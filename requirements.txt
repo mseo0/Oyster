@@ -1,0 +1,13 @@
+# Phase 1 scanner core — all local, no network/telemetry libraries.
+psutil>=5.9          # cross-platform process inspection (Mac + Windows)
+python-magic>=0.4.27 # content-based file typing (needs libmagic; falls back to extensions)
+customtkinter>=5.2   # modern desktop UI (rounded widgets, light/dark); UI-only, pure Python
+Pillow>=10.0         # UI-only: tints the bundled Lucide PNG icons at runtime
+
+# Notes:
+#  - ClamAV is NOT a pip package. Install the engine separately:
+#       macOS:    brew install clamav
+#       Windows:  https://www.clamav.net/downloads  (or: winget install ClamAV.ClamAV)
+#    Then run `freshclam` once to download signature definitions (the ONE
+#    sanctioned online step). The scanner shells out to clamscan/clamd.
+#  - No requests/httpx/urllib3 here on purpose. Core must not open sockets.

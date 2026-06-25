@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# PyInstaller build artifacts
+/build/
+/dist/
+*.spec.bak
+
+# Oyster local data
+.oyster/
+
+# macOS / editors
+.DS_Store
+*.swp
+.idea/
+.vscode/
