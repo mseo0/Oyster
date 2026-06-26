@@ -47,7 +47,7 @@ async function init() {
     const n = e.target.closest('[data-page]'); if (n) showPage(n.dataset.page);
   });
   content.addEventListener('click', onContentClick);
-  api.onEvent((m) => { if (m.event === 'progress') setStatus(m.data); });
+  api.onEvent((m) => { if (m.event === 'progress') onProgress(m.data); });
   try {
     const h = await api.rpc('hello');
     S.model = h.model; S.target = h.defaultTarget;
@@ -295,14 +295,14 @@ async function onContentClick(e) {
 }
 
 async function runScan(method, params) {
-  if (S.busy) return; S.busy = true; setStatus('Scanning…');
+  if (S.busy) return; S.busy = true; startScanUI('Scanning…');
   try {
     const r = await api.rpc(method, params);
     S.report = r; S.data.Files = r.findings; S.sel.Files = null;
-    setStatus(`Done. ${r.filesSeen.toLocaleString()} files · ${r.findings.length} finding(s)`
+    setStatus(`Done · ${r.filesSeen.toLocaleString()} files in ${r.secs}s · ${r.findings.length} finding(s)`
       + (r.filesUnreadable ? ` · ${r.filesUnreadable.toLocaleString()} unreadable` : '') + ' · offline.');
   } catch (e) { setStatus('Scan stopped: ' + e.message); }
-  S.busy = false; if (S.page === 'Files') renderScan();
+  endScanUI(); S.busy = false; if (S.page === 'Files') renderScan();
   updateNav();
 }
 async function deepScan() {
@@ -313,16 +313,16 @@ async function deepScan() {
   if (r === 1) runScan('deep_scan', {});
 }
 async function sweep() {
-  if (S.busy) return; S.busy = true; setStatus('Inspecting processes…');
+  if (S.busy) return; S.busy = true; startScanUI('Inspecting processes…');
   try { const r = await api.rpc('sweep_processes'); S.data.Processes = r.processes; S.sel.Processes = null; setStatus(`${r.processes.length} suspicious process(es).`); }
   catch (e) { setStatus('Sweep failed: ' + e.message); }
-  S.busy = false; if (S.page === 'Processes') renderScan(); updateNav();
+  endScanUI(); S.busy = false; if (S.page === 'Processes') renderScan(); updateNav();
 }
 async function audit() {
-  if (S.busy) return; S.busy = true; setStatus('Auditing software + posture…');
+  if (S.busy) return; S.busy = true; startScanUI('Auditing software & OS…');
   try { const r = await api.rpc('audit_vulns'); S.data.Vulnerabilities = r.vulns; S.sel.Vulnerabilities = null; setStatus(`${r.vulns.length} vulnerability finding(s).`); }
   catch (e) { setStatus('Audit failed: ' + e.message); }
-  S.busy = false; if (S.page === 'Vulnerabilities') renderScan(); updateNav();
+  endScanUI(); S.busy = false; if (S.page === 'Vulnerabilities') renderScan(); updateNav();
 }
 async function quarantine() {
   const f = S.sel.Files; if (!f) return;
@@ -347,5 +347,31 @@ function setMode(mode) {
   document.querySelectorAll('.seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
 }
 function setStatus(s) { $('status').textContent = s; }
+
+// ---------- live scan timer / throughput ----------
+let scan = { start: 0, count: 0, timer: null, active: false, label: '' };
+function startScanUI(label) {
+  scan = { start: Date.now(), count: 0, timer: null, active: true, label };
+  $('scanbar').classList.remove('hidden'); paintScanBar();
+  scan.timer = setInterval(paintScanBar, 250);
+}
+function endScanUI() {
+  scan.active = false; if (scan.timer) clearInterval(scan.timer);
+  $('scanbar').classList.add('hidden');
+}
+function onProgress(text) {
+  setStatus(text);
+  const m = /([\d,]+)\s+seen/.exec(text); if (m) scan.count = parseInt(m[1].replace(/,/g, ''), 10);
+}
+function fmtTime(s) { const m = Math.floor(s / 60), ss = Math.floor(s % 60); return m + ':' + String(ss).padStart(2, '0'); }
+function paintScanBar() {
+  if (!scan.active) return;
+  const sec = (Date.now() - scan.start) / 1000;
+  const rate = sec > 0 ? Math.round(scan.count / sec) : 0;
+  const stat = (v, l) => `<span class="x"><div class="v">${v}</div><div class="l">${l}</div></span>`;
+  $('scanbar').innerHTML = `<span class="spin"></span><span class="lbl">${scan.label}</span>
+    <span class="track"><i></i></span>
+    <span class="nums">${stat(scan.count.toLocaleString(), 'files')}${stat(fmtTime(sec), 'elapsed')}${stat(rate.toLocaleString(), '/sec')}</span>`;
+}
 
 init();

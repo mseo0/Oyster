@@ -34,10 +34,15 @@ a = Analysis(
     noarchive=False,
 )
 pyz = PYZ(a.pure)
+# onedir (NOT onefile): a one-file PyInstaller binary re-execs itself at start,
+# which makes the real Python process self-responsible for macOS TCC — so the
+# app's Full Disk Access grant wouldn't cover it and it would re-prompt every
+# launch. onedir runs the interpreter directly, inheriting the app's TCC grant.
 exe = EXE(
-    pyz, a.scripts, a.binaries, a.datas, [],
+    pyz, a.scripts, [],
+    exclude_binaries=True,
     name="oyster-engine",
-    console=True,          # headless stdio process; no window
-    onefile=True,
+    console=True,
     upx=False,
 )
+coll = COLLECT(exe, a.binaries, a.datas, name="oyster-engine", upx=False)

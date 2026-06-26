@@ -20,9 +20,9 @@ function repoRoot() {
 
 function engineCommand() {
   if (app.isPackaged) {
-    // PyInstaller one-file binary bundled as an extra resource
+    // PyInstaller onedir bundle: engine/oyster-engine/oyster-engine(.exe)
     const exe = process.platform === 'win32' ? 'oyster-engine.exe' : 'oyster-engine';
-    return { cmd: path.join(process.resourcesPath, 'engine', exe), args: [], opts: {} };
+    return { cmd: path.join(process.resourcesPath, 'engine', 'oyster-engine', exe), args: [], opts: {} };
   }
   // dev: run the sidecar with the project venv interpreter
   const py = process.platform === 'win32'

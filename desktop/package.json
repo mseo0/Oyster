@@ -18,12 +18,15 @@
     "productName": "Oyster",
     "files": ["electron/**", "renderer/**"],
     "extraResources": [
-      { "from": "../dist", "to": "engine", "filter": ["oyster-engine", "oyster-engine.exe"] }
+      { "from": "../dist/oyster-engine", "to": "engine/oyster-engine" }
     ],
     "mac": {
       "category": "public.app-category.utilities",
       "target": ["dmg"],
-      "icon": "../branding/Oyster.icns"
+      "icon": "../branding/Oyster.icns",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
     },
     "win": {
       "target": ["nsis"],
