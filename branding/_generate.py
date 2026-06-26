@@ -23,14 +23,15 @@ from PIL import Image  # noqa: E402
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 
-# the motif: two round-capped shell arcs + a centred pearl, in colour {c}
+# the motif (matches Oyster.dc): two bracket-style shell arcs + a centred pearl.
+# Design source viewBox is 0 0 64 64; scaled x16 to a 1024 canvas here.
 MOTIF = """
-  <g fill="none" stroke="{c}" stroke-width="92"
+  <g fill="none" stroke="{c}" stroke-width="104"
      stroke-linecap="round" stroke-linejoin="round">
-    <path d="M366 455 C366 360 430 345 512 345 C594 345 658 360 658 455"/>
-    <path d="M372 645 C372 745 442 762 512 762 C582 762 652 745 652 645"/>
+    <path d="M256 416 V368 Q256 224 512 224 Q768 224 768 368 V416"/>
+    <path d="M256 608 V656 Q256 800 512 800 Q768 800 768 656 V608"/>
   </g>
-  <circle cx="512" cy="592" r="84" fill="{c}"/>
+  <circle cx="512" cy="512" r="86" fill="{c}"/>
 """
 
 

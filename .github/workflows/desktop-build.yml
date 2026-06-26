@@ -1,0 +1,54 @@
+name: Build Oyster desktop app
+
+# Builds the Electron app (with the PyInstaller engine sidecar bundled) for
+# macOS and Windows. PyInstaller/Electron can't cross-compile, so each OS is
+# built on its own runner. Artifacts are uploaded per-platform.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            engine_build: "python -m PyInstaller --noconfirm --clean packaging/engine.spec"
+            dist: "npm run dist:mac"
+            artifact: "desktop/dist/*.dmg"
+          - os: windows-latest
+            engine_build: "python -m PyInstaller --noconfirm --clean packaging/engine.spec"
+            dist: "npm run dist:win"
+            artifact: "desktop/dist/*.exe"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      - name: Install Python deps + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build engine sidecar
+        run: ${{ matrix.engine_build }}
+
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+
+      - name: Install + package Electron app
+        working-directory: desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"   # unsigned in CI; sign separately for release
+        run: |
+          npm install
+          ${{ matrix.dist }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oyster-${{ matrix.os }}
+          path: ${{ matrix.artifact }}

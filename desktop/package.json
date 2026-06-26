@@ -1,0 +1,33 @@
+{
+  "name": "oyster",
+  "productName": "Oyster",
+  "version": "0.1.0",
+  "description": "Oyster — local agentic antivirus that never phones home",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.oyster.antivirus",
+    "productName": "Oyster",
+    "files": ["electron/**", "renderer/**"],
+    "extraResources": [
+      { "from": "../dist", "to": "engine", "filter": ["oyster-engine", "oyster-engine.exe"] }
+    ],
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": ["dmg"],
+      "icon": "../branding/Oyster.icns"
+    },
+    "win": {
+      "target": ["nsis"],
+      "icon": "../branding/oyster.ico"
+    }
+  }
+}

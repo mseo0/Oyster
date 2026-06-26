@@ -9,6 +9,11 @@ __pycache__/
 /dist/
 *.spec.bak
 
+# Electron app
+desktop/node_modules/
+desktop/dist/
+*.dmg
+
 # Oyster local data
 .oyster/
 
