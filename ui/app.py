@@ -16,7 +16,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from tkinter import END, filedialog, messagebox
+from tkinter import END, PanedWindow, filedialog, messagebox
 
 import customtkinter as ctk
 
@@ -117,8 +117,8 @@ class PreflightGate(ctk.CTkFrame):
 
         head = ctk.CTkFrame(card, fg_color="transparent")
         head.pack(fill="x", padx=30, pady=(28, 6))
-        self.brand_icon = iconset.icon("shield-check", theme.PRIMARY,
-                                       theme.PRIMARY, size=30)
+        self.brand_icon = iconset.icon("oyster-mark", theme.TEXT[0],
+                                       theme.TEXT[1], size=34)
         ctk.CTkLabel(head, text="", image=self.brand_icon).pack(side="left")
         box = ctk.CTkFrame(head, fg_color="transparent")
         box.pack(side="left", padx=12)
@@ -244,10 +244,10 @@ class App:
 
         brand = ctk.CTkFrame(bar, fg_color="transparent")
         brand.grid(row=0, column=0, sticky="ew", padx=20, pady=(22, 6))
-        self.brand_icon = iconset.icon("shield-check", theme.PRIMARY,
-                                       theme.PRIMARY, size=24)
+        self.brand_icon = iconset.icon("oyster-mark", theme.TEXT[0],
+                                       theme.TEXT[1], size=26)
         ctk.CTkLabel(brand, text="", image=self.brand_icon,
-                     width=24).pack(side="left")
+                     width=26).pack(side="left")
         ctk.CTkLabel(brand, text="Oyster", font=self.fonts["brand"],
                      text_color=theme.TEXT).pack(side="left", padx=8)
 
@@ -296,6 +296,7 @@ class App:
     def _toggle_mode(self):
         ctk.set_appearance_mode(
             "dark" if self.mode_switch.get() else "light")
+        self._apply_pane_colors()
 
     # --- main area --------------------------------------------------------
     def _build_main(self):
@@ -306,7 +307,7 @@ class App:
 
         # header
         head = ctk.CTkFrame(main, fg_color="transparent")
-        head.grid(row=0, column=0, sticky="ew", pady=(0, 16))
+        head.grid(row=0, column=0, sticky="ew", pady=(0, 14))
         head.grid_columnconfigure(0, weight=1)
         self.page_title = ctk.CTkLabel(head, text="Files",
                                        font=self.fonts["title"],
@@ -316,10 +317,16 @@ class App:
                      fg_color=theme.CARD, corner_radius=8, text_color=theme.MUTED,
                      padx=12, pady=6).grid(row=0, column=1, sticky="e")
 
-        # stacked page cards
+        # vertical split: results (top) vs the details+report panels (bottom),
+        # both with draggable sashes so the user can resize panels at will.
+        self.vpane = PanedWindow(main, orient="vertical", bd=0,
+                                 sashwidth=10, sashrelief="flat",
+                                 showhandle=False, opaqueresize=True)
+        self.vpane.grid(row=1, column=0, sticky="nsew")
+
+        # top pane: stacked page cards (Files / Processes / Vulnerabilities)
         self.pages = {}
-        holder = ctk.CTkFrame(main, fg_color="transparent")
-        holder.grid(row=1, column=0, sticky="nsew")
+        holder = ctk.CTkFrame(self.vpane, fg_color="transparent")
         holder.grid_columnconfigure(0, weight=1)
         holder.grid_rowconfigure(0, weight=1)
         for key, builder in (("Files", self._page_files),
@@ -329,23 +336,98 @@ class App:
             card.grid(row=0, column=0, sticky="nsew")
             builder(card)
             self.pages[key] = card
+        self.vpane.add(holder, minsize=200, stretch="always")
 
-        # shared status + AI report
-        self.status = ctk.CTkLabel(main, text="Ready.", anchor="w",
-                                   font=self.fonts["small"],
-                                   text_color=theme.MUTED)
-        self.status.grid(row=2, column=0, sticky="ew", pady=(14, 6))
+        # bottom pane: horizontal split of Details | AI report
+        self.hpane = PanedWindow(self.vpane, orient="horizontal", bd=0,
+                                 sashwidth=10, sashrelief="flat",
+                                 showhandle=False, opaqueresize=True)
 
-        rep = ctk.CTkFrame(main, fg_color=theme.CARD, corner_radius=16)
-        rep.grid(row=3, column=0, sticky="ew")
+        det = ctk.CTkFrame(self.hpane, fg_color=theme.CARD, corner_radius=16)
+        det.grid_columnconfigure(0, weight=1)
+        det.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(det, text="DETAILS", font=self.fonts["small"],
+                     text_color=theme.MUTED).grid(row=0, column=0, sticky="w",
+                                                   padx=18, pady=(14, 4))
+        self.details = ctk.CTkTextbox(det, fg_color=theme.INSET,
+                                      corner_radius=12, font=self.fonts["mono"],
+                                      text_color=theme.TEXT, border_width=0,
+                                      wrap="word")
+        self.details.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
+        self._set_details("Select a result to review its full details.")
+
+        rep = ctk.CTkFrame(self.hpane, fg_color=theme.CARD, corner_radius=16)
         rep.grid_columnconfigure(0, weight=1)
+        rep.grid_rowconfigure(1, weight=1)
         ctk.CTkLabel(rep, text="AI SUMMARY REPORT", font=self.fonts["small"],
                      text_color=theme.MUTED).grid(row=0, column=0, sticky="w",
                                                    padx=18, pady=(14, 4))
-        self.report = ctk.CTkTextbox(rep, height=132, fg_color=theme.INSET,
+        self.report = ctk.CTkTextbox(rep, fg_color=theme.INSET,
                                      corner_radius=12, font=self.fonts["mono"],
-                                     text_color=theme.TEXT, border_width=0)
-        self.report.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 16))
+                                     text_color=theme.TEXT, border_width=0,
+                                     wrap="word")
+        self.report.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
+        self.hpane.add(det, minsize=180, stretch="always")
+        self.hpane.add(rep, minsize=180, stretch="always")
+        self.vpane.add(self.hpane, minsize=120, height=190, stretch="never")
+
+        # status bar (always-visible footer)
+        self.status = ctk.CTkLabel(main, text="Ready.", anchor="w",
+                                   font=self.fonts["small"],
+                                   text_color=theme.MUTED)
+        self.status.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+
+        self._apply_pane_colors()
+
+    def _apply_pane_colors(self):
+        # raw tkinter PanedWindows don't follow CTk's light/dark, so colour the
+        # sashes to match the current appearance (and on every mode toggle).
+        sash = "#D5D8E0" if ctk.get_appearance_mode() == "Light" else "#2A2C3A"
+        for pw in (self.vpane, self.hpane):
+            pw.configure(bg=sash)
+
+    # --- details / review panel ------------------------------------------
+    def _set_details(self, text):
+        self.details.configure(state="normal")
+        self.details.delete("1.0", END)
+        self.details.insert("1.0", text)
+        self.details.configure(state="disabled")
+
+    def _review_finding(self):
+        self._show_finding(self.files_list.selected())
+
+    def _review_vuln(self):
+        self._show_finding(self.vuln_list.selected())
+
+    def _show_finding(self, f):
+        if f is None:
+            return
+        lines = [
+            f"Severity : {f.severity.value.upper()}",
+            f"Type     : {f.kind.value}",
+            f"Target   : {f.target}",
+            f"Rule     : {f.rule}",
+        ]
+        if f.detail:
+            lines.append(f"Detail   : {f.detail}")
+        for k, v in (f.evidence or {}).items():
+            lines.append(f"{k:<9}: {v}")
+        self._set_details("\n".join(lines))
+
+    def _review_proc(self):
+        t = self.proc_list.selected()
+        if t is None:
+            return
+        lines = [
+            f"Process  : {t.name}  (pid {t.pid})",
+            f"Score    : {t.score}",
+            f"Protected: {'yes (never auto-killed)' if t.protected else 'no'}",
+            f"Executable: {t.exe or '—'}",
+            f"Reasons  : {'; '.join(t.reasons) if t.reasons else '—'}",
+        ]
+        if getattr(t, "connections", None):
+            lines.append(f"Network  : {t.connections}")
+        self._set_details("\n".join(lines))
 
     def show_page(self, key):
         self.pages[key].tkraise()
@@ -401,7 +483,9 @@ class App:
             row=0, column=1, padx=(0, 8))
         self._btn(top, "Scan", self._scan, "primary").grid(row=0, column=2)
 
-        self.files_list = ResultList(card, self.fonts, empty="Run a scan to see findings.")
+        self.files_list = ResultList(card, self.fonts,
+                                     on_select=self._review_finding,
+                                     empty="Run a scan to see findings.")
         self.files_list.grid(row=1, column=0, sticky="nsew", padx=(18, 8),
                              pady=(0, 18))
 
@@ -427,6 +511,7 @@ class App:
                   "primary").grid(row=0, column=0, columnspan=2, sticky="w",
                                   padx=18, pady=(18, 12))
         self.proc_list = ResultList(card, self.fonts,
+                                    on_select=self._review_proc,
                                     empty="Sweep to inspect processes.")
         self.proc_list.grid(row=1, column=0, sticky="nsew", padx=(18, 8),
                             pady=(0, 18))
@@ -448,6 +533,7 @@ class App:
                   "primary").grid(row=0, column=0, sticky="w", padx=18,
                                   pady=(18, 12))
         self.vuln_list = ResultList(card, self.fonts,
+                                    on_select=self._review_vuln,
                                     empty="Audit to list known weaknesses.")
         self.vuln_list.grid(row=1, column=0, sticky="nsew", padx=18,
                             pady=(0, 18))
@@ -481,15 +567,27 @@ class App:
                               include_noise=True),
             "Deep scan — walking the whole computer…")
 
+    def _set_status(self, text):
+        self.status.configure(text=text)
+
+    def _progress(self, text):
+        # called from the scan worker thread — marshal onto Tk's main thread,
+        # which is the only thread allowed to touch widgets.
+        self.root.after(0, self._set_status, text)
+
     def _run_scan(self, cfg, status):
-        self.status.configure(text=status)
+        self._set_status(status)
         self.files_list.clear()
         rules = Path(__file__).resolve().parent.parent / "rules"
         scanner = Scanner(cfg, rules_dir=rules)
 
         def work():
-            report = scanner.scan(
-                progress=lambda s: self.status.configure(text=s))
+            try:
+                report = scanner.scan(progress=self._progress)
+            except Exception as e:  # never let a scan die silently
+                self.root.after(0, self._set_status,
+                                f"Scan stopped: {type(e).__name__}: {e}")
+                return
             self.findings = report.findings
             self.root.after(0, self._render, report)
 
@@ -503,9 +601,12 @@ class App:
             self.files_list.add(
                 f, f"[{f.severity.value}]  {f.target}   —   {f.rule}",
                 theme.severity_color(f.severity.value))
+        unread = (f" · {report.files_unreadable:,} unreadable"
+                  if report.files_unreadable else "")
         self.status.configure(
-            text=f"Done. {report.files_seen} files · {len(self.findings)} "
-                 f"finding(s) · {report.vulnerabilities} vuln(s) · offline.")
+            text=f"Done. {report.files_seen:,} files · {len(self.findings)} "
+                 f"finding(s) · {report.vulnerabilities} vuln(s){unread} · "
+                 "offline.")
 
     def _selected(self):
         return self.files_list.selected()

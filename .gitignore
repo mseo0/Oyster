@@ -12,6 +12,9 @@ __pycache__/
 # Oyster local data
 .oyster/
 
+# Icon build intermediate (the .icns/.ico/.png outputs are kept)
+branding/Oyster.iconset/
+
 # macOS / editors
 .DS_Store
 *.swp

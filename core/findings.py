@@ -57,6 +57,7 @@ class Store:
         # shared connection safe here.
         self.db = sqlite3.connect(str(db_path), check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA busy_timeout=5000")
         self._migrate()
 
     def _migrate(self) -> None:

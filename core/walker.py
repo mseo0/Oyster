@@ -59,6 +59,10 @@ def walk(cfg: config.ScanConfig) -> Iterator[Candidate]:
                         st = os.stat(p)  # resolve to the target
                 except OSError:
                     continue
+                # Only regular files. Skip devices/FIFOs/sockets — hashing e.g.
+                # /dev/zero would read an infinite stream and hang the scan.
+                if not stat.S_ISREG(st.st_mode):
+                    continue
                 ext = p.suffix.lower()
                 yield Candidate(
                     path=p,

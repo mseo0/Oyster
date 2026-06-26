@@ -103,6 +103,7 @@ if IS_MAC:
     app = BUNDLE(
         ui_coll,
         name="Oyster.app",
+        icon=os.path.join(ROOT, "branding", "Oyster.icns"),
         bundle_identifier="com.oyster.antivirus",
         info_plist={
             "NSHighResolutionCapable": True,
@@ -121,4 +122,5 @@ else:
         console=False,          # windowed — no terminal pops up
         onefile=True,
         upx=False,
+        icon=os.path.join(ROOT, "branding", "oyster.ico"),
     )

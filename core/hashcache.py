@@ -30,6 +30,7 @@ class HashCache:
         # worker thread (see findings.Store for the same rationale).
         self.db = sqlite3.connect(str(db_path), check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA busy_timeout=5000")
         self.db.executescript(
             """
             CREATE TABLE IF NOT EXISTS filehashes (
@@ -41,7 +42,11 @@ class HashCache:
             """
         )
         self.db.commit()
-        self._pending = 0
+        # Rows are buffered in memory and flushed in batches. We deliberately do
+        # NOT keep a write transaction open across the scan loop: that would
+        # hold SQLite's write lock and block the separate findings.Store
+        # connection ("database is locked") when a detection is recorded.
+        self._buffer: list[tuple] = []
 
     def hash_for(self, path: Path, size: int | None = None,
                  mtime: float | None = None) -> tuple[str, bool]:
@@ -62,21 +67,23 @@ class HashCache:
         ).fetchone()
         if row and row[0] == size and row[1] == mtime:
             return row[2], False  # unchanged -> cached
-        digest = sha256_file(path)
-        self.db.execute(
-            "INSERT OR REPLACE INTO filehashes VALUES (?,?,?,?)",
-            (str(path), size, mtime, digest),
-        )
-        self._pending += 1
-        if self._pending >= self._COMMIT_EVERY:
+        try:
+            digest = sha256_file(path)
+        except OSError:
+            return "", False  # unreadable (perms, vanished, I/O) -> skip, never fatal
+        self._buffer.append((str(path), size, mtime, digest))
+        if len(self._buffer) >= self._COMMIT_EVERY:
             self.flush()
         return digest, True
 
     def flush(self) -> None:
-        """Commit any batched hash writes. Call at the end of a scan."""
-        if self._pending:
+        """Write buffered hashes in one transaction. Call at the end of a scan."""
+        if self._buffer:
+            self.db.executemany(
+                "INSERT OR REPLACE INTO filehashes VALUES (?,?,?,?)",
+                self._buffer)
             self.db.commit()
-            self._pending = 0
+            self._buffer.clear()
 
     def known_bad_label(self, sha256: str) -> str | None:
         row = self.db.execute(

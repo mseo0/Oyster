@@ -6,6 +6,7 @@ CLI and UI can both render it. Only findings (tens) ever reach the AI layer.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -19,11 +20,18 @@ from .walker import walk
 ProgressFn = Callable[[str], None]
 
 
+def _short(p: Path, maxlen: int = 70) -> str:
+    """Path trimmed from the left so the live status line never overflows."""
+    s = str(p)
+    return s if len(s) <= maxlen else "…" + s[-(maxlen - 1):]
+
+
 @dataclass
 class ScanReport:
     files_seen: int = 0
     files_hashed: int = 0
     files_scanned: int = 0
+    files_unreadable: int = 0   # couldn't be read (perms) -> coverage gap
     findings: list[Finding] = field(default_factory=list)
     engine_available: bool = False
     process_threats: int = 0
@@ -41,15 +49,28 @@ class Scanner:
              vuln: bool = True) -> ScanReport:
         report = ScanReport(engine_available=self.engine.available)
         progress(self.engine.status())
+        roots = ", ".join(str(r) for r in self.cfg.roots)
+        progress(f"Walking {roots} …")
 
+        last = 0.0
         for cand in walk(self.cfg):
             report.files_seen += 1
-            if report.files_seen % 500 == 0:
-                progress(f"scanned {report.files_seen} files...")
+            # throttle the live "current file" line to ~10/sec so it stays
+            # readable and never floods the UI event loop.
+            now = time.monotonic()
+            if now - last >= 0.1:
+                last = now
+                progress(
+                    f"Scanning · {report.files_seen:,} seen · "
+                    f"{report.files_hashed:,} hashed · "
+                    f"{report.files_scanned:,} deep · {_short(cand.path)}")
 
             digest, _changed = self.cache.hash_for(
                 cand.path, cand.size, cand.mtime)
             if not digest:
+                # regular file we couldn't read — a real coverage gap, surfaced
+                # below so the user can grant Full Disk Access / run with sudo.
+                report.files_unreadable += 1
                 continue
             report.files_hashed += 1
 
@@ -68,6 +89,9 @@ class Scanner:
             if (cand.interesting and self.engine.available
                     and cand.size <= config.MAX_CONTENT_SCAN_BYTES):
                 report.files_scanned += 1
+                # this call blocks (clamscan), so name the file we're on
+                progress(f"Inspecting with ClamAV · {_short(cand.path)}")
+                last = time.monotonic()
                 res = self.engine.scan_file(cand.path)
                 if res.infected:
                     self._record(report, Finding(
@@ -79,14 +103,17 @@ class Scanner:
 
         self.cache.flush()  # persist the batched hash writes
 
-        progress("inspecting running processes...")
+        progress(f"Walked {report.files_seen:,} files · inspecting running "
+                 "processes…")
         self._scan_processes(report)
 
         if vuln:
-            progress("auditing installed software + OS posture...")
+            progress("Auditing installed software + OS posture…")
             self._scan_vulnerabilities(report)
 
-        progress(f"done. {len(report.findings)} finding(s).")
+        tail = (f" · {report.files_unreadable:,} unreadable (grant Full Disk "
+                "Access to cover them)") if report.files_unreadable else ""
+        progress(f"Done · {len(report.findings)} finding(s){tail}.")
         return report
 
     def _scan_vulnerabilities(self, report: ScanReport) -> None:

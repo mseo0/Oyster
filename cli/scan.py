@@ -89,13 +89,28 @@ def main(argv: list[str] | None = None) -> int:
             _apply_processes(threats, store)
         return 0
 
-    report = scanner.scan(progress=lambda s: print("  ..", s),
-                          vuln=not args.no_vuln)
+    # live, single-line status on a TTY; plain lines when piped to a file.
+    _tty = sys.stdout.isatty()
+
+    def _prog(s: str) -> None:
+        if _tty:
+            sys.stdout.write("\r\x1b[2K  .. " + s)
+            sys.stdout.flush()
+        else:
+            print("  ..", s)
+
+    report = scanner.scan(progress=_prog, vuln=not args.no_vuln)
+    if _tty:
+        print()  # finish the live line
     print(f"\nSeen {report.files_seen}, hashed {report.files_hashed}, "
           f"engine-scanned {report.files_scanned}, "
+          f"unreadable {report.files_unreadable}, "
           f"processes-flagged {report.process_threats}, "
           f"vulns {report.vulnerabilities}, "
           f"findings {len(report.findings)}")
+    if report.files_unreadable:
+        print(f"  note: {report.files_unreadable} file(s) couldn't be read — "
+              "grant Full Disk Access (macOS) or run with sudo to cover them.")
 
     if report.findings:
         print("\n-- AI triage --")
