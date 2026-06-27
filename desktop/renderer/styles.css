@@ -202,6 +202,12 @@ button { font-family: inherit; cursor: pointer; }
   border: 2.5px solid var(--accent-soft); border-top-color: var(--accent);
   animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.spin-sm { width: 16px; height: 16px; border-radius: 50%; display: inline-block;
+  border: 2.5px solid var(--accent-soft); border-top-color: var(--accent);
+  animation: spin .8s linear infinite; vertical-align: middle; }
+.rec.removing { opacity: .65; pointer-events: none; }
+.rec-removing { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px;
+  font-weight: 600; color: var(--accent); }
 .scanbar .lbl { font-size: 13px; font-weight: 600; }
 .scanbar .track { flex: 1; height: 4px; border-radius: 3px; background: var(--rowhover); overflow: hidden; }
 .scanbar .track i { display: block; height: 100%; width: 34%; border-radius: 3px;
@@ -224,6 +230,16 @@ button { font-family: inherit; cursor: pointer; }
   font: 500 13px 'Hanken Grotesk'; outline: none; }
 .chat-input::placeholder { color: var(--muted2); }
 .cleanup-body { flex: 1; overflow-y: auto; }
+/* ask-AI-about-this-file box in the finding inspector */
+.askai { display: flex; align-items: center; gap: 8px; margin-top: 8px;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+  padding: 5px 5px 5px 12px; }
+.askai .chat-input { height: 32px; font-size: 12.5px; }
+.askai .btn { height: 32px; padding: 0 12px; flex: 0 0 auto; }
+.askai-ans { margin-top: 10px; padding: 12px 14px; font-size: 12.5px; line-height: 1.55;
+  color: var(--text); white-space: pre-wrap; background: var(--panel2);
+  border: 1px solid var(--border-soft); border-radius: 10px; }
+.askai-ans:empty { display: none; }
 .rv-imp { font: 600 10px 'JetBrains Mono'; color: var(--accent); background: var(--accent-soft);
   padding: 1px 7px; border-radius: 6px; flex: 0 0 auto; }
 .rv-risk { font: 600 10px 'JetBrains Mono'; color: #E5820A; background: rgba(245,130,10,.15);
@@ -252,10 +268,15 @@ button { font-family: inherit; cursor: pointer; }
 .modal-tools { display: flex; align-items: center; gap: 8px; padding: 0 20px 10px;
   border-bottom: 1px solid var(--border-soft); }
 .rv-mini { height: 28px; padding: 0 10px; font-size: 11.5px; }
+.find-tabs { padding: 10px 14px 2px; }
+.rv-tabs { display: inline-flex; gap: 4px; margin-left: 6px; padding: 3px;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 9px; }
+.rv-tabs .rv-tab { height: 24px; border: 0; background: transparent; color: var(--muted); }
+.rv-tabs .rv-tab.on { background: var(--accent-soft); color: var(--accent); }
 .rv-count { margin-left: auto; font-size: 12px; color: var(--muted2); }
 .modal-list { flex: 1; overflow-y: auto; padding: 8px 12px; }
 .rv-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 9px; cursor: pointer; }
-.rv-row:hover { background: var(--rowhover); }
+.rv-row:hover, .rv-row:focus-within { background: var(--rowhover); }
 .rv-row.static, .rv-row.keep { cursor: default; }
 .rv-row input { accent-color: var(--accent); width: 15px; height: 15px; flex: 0 0 15px; }
 .rv-name { font: 600 12.5px 'JetBrains Mono'; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 230px; }

@@ -17,6 +17,8 @@ process.on('unhandledRejection', (e) => dbg('UNHANDLED ' + (e && e.stack || e)))
 let win = null;
 let engine = null;
 let nextId = 1;
+let scanBusy = false;        // true while a scan/sweep/audit is running
+let confirmedQuit = false;   // user chose "Quit anyway" past the scan warning
 const pending = new Map(); // id -> {resolve, reject}
 
 function repoRoot() {
@@ -93,6 +95,20 @@ function createWindow() {
     },
   });
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  // warn before exiting if a scan is still running (covers the red traffic
+  // light, Cmd/Alt+F4 and Cmd+Q — all of which fire the window 'close' event).
+  win.on('close', (e) => {
+    if (!scanBusy || confirmedQuit) return;
+    e.preventDefault();
+    const r = dialog.showMessageBoxSync(win, {
+      type: 'warning',
+      buttons: ['Keep scanning', 'Stop scan & quit'],
+      defaultId: 0, cancelId: 0,
+      message: 'A scan is still running',
+      detail: 'Quitting now will stop the scan in progress. Are you sure you want to quit?',
+    });
+    if (r === 1) { confirmedQuit = true; scanBusy = false; win.close(); }
+  });
   win.on('closed', () => { win = null; });
 }
 
@@ -122,6 +138,8 @@ ipcMain.handle('open-fda', () => {
 ipcMain.handle('set-theme', (_e, mode) => { nativeTheme.themeSource = mode; });
 // reveal a file in Finder/Explorer so the user can review it
 ipcMain.handle('reveal', (_e, p) => { try { shell.showItemInFolder(p); } catch {} });
+// renderer tells us when a scan is in flight, so we can warn before quitting
+ipcMain.on('set-busy', (_e, b) => { scanBusy = !!b; });
 
 app.whenReady().then(() => {
   try { nativeTheme.themeSource = 'dark'; } catch (e) { dbg('theme ' + e); }

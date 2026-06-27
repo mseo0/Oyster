@@ -72,45 +72,50 @@ def _family(rule: str) -> str:
 
 
 def describe(f, source: str) -> tuple[str, str]:
-    """Return (plain-English explanation, recommended action) for a finding."""
+    """Return (plain, friendly explanation, recommended action) for a finding.
+
+    Written for people who aren't computer experts: short sentences, everyday
+    words instead of jargon, and a clear "what should I do" at the end.
+    """
     sev = f.severity.value
     rule = f.rule or ""
     rl = rule.lower()
     kind = f.kind.value
 
     if "eicar" in rl:
-        return ("This is the EICAR test file — a harmless 68-byte string the "
-                "antivirus industry uses to confirm a scanner is working. It is "
-                "NOT real malware and cannot harm your Mac; you can safely ignore "
-                "or delete it.", "IGNORE")
+        return ("This is a harmless test file that antivirus companies use to "
+                "check that a scanner is working. It is NOT a real virus and "
+                "can't harm your computer. You can safely delete it or ignore it.",
+                "IGNORE")
 
     if kind == "vulnerability":
-        return (f.detail or "A known weakness in installed software or an OS "
-                "setting that an attacker could exploit.", "REVIEW")
+        return (f.detail or "A program on your computer is out of date and has a "
+                "known weak spot that someone could take advantage of. Updating "
+                "the program usually fixes this.", "REVIEW")
 
     fam = _family(rule)
     if "known-bad-hash" in rl:
-        label = rule.split(":")[-1]
-        ai = (f"This file's SHA-256 fingerprint is an exact, byte-for-byte match "
-              f"for a known-malware entry ({label}). Hash matches are definitive — "
-              f"this isn't a guess, it is that malicious file.")
+        ai = ("This exact file is already on a list of known viruses. This isn't "
+              "a guess — it's a file that has caused harm on other people's "
+              "computers.")
     elif kind.startswith("file"):
-        ai = (f"ClamAV's detection engine matched the signature/YARA rule "
-              f"“{rule}”"
-              + (f", which is associated with {fam}. " if fam else ". ")
-              + "The pattern of bytes in this file lines up with known-malicious "
-              "code.")
+        ai = ("This file matches the pattern of known harmful software"
+              + (f", specifically {fam}. " if fam else ". ")
+              + "In plain terms: parts of this file look the same as software "
+              "that's known to cause problems.")
     else:
-        ai = f.detail or "Flagged by Oyster's heuristics."
+        ai = f.detail or "Oyster flagged this as worth a closer look."
 
     if source == "user-created":
-        ai += (" Heads-up: this file carries no download provenance — it looks "
-               "like something created locally on this Mac rather than downloaded, "
-               "which makes a false positive more likely. Review it before acting.")
+        ai += (" One thing to keep in mind: this file doesn't look like it was "
+               "downloaded from the internet — it seems to have been made on this "
+               "computer, so this might be a false alarm. Take a look before you "
+               "remove it.")
         return ai, "ASK_USER"
     if sev in ("critical", "high"):
-        ai += " Recommended: quarantine it (reversible — it moves to a vault, " \
-              "it isn't deleted)."
+        ai += (" We'd suggest quarantining it. That just means moving it somewhere "
+               "safe where it can't run — it isn't deleted, and you can put it "
+               "back later if you need to.")
         return ai, "QUARANTINE"
     return ai, "ASK_USER"
 
@@ -132,12 +137,12 @@ def _finding_dict(f) -> dict:
 
 
 def _proc_dict(t) -> dict:
-    ai, action = (("This process scores high for masquerading / suspicious "
-                   "behaviour. Suspending freezes it (reversible) so you can "
-                   "investigate without killing it outright.", "SUSPEND")
+    ai, action = (("This program is behaving like software that tries to hide "
+                   "what it really is. You can pause it to stop it safely without "
+                   "fully closing it, then decide what to do.", "SUSPEND")
                   if t.score >= 50 else
-                  ("Unusual but low-risk behaviour. Worth a look, but no urgent "
-                   "action needed.", "REVIEW"))
+                  ("This program is doing something a little unusual. It's "
+                   "probably fine, but it's worth a quick look.", "REVIEW"))
     return {"pid": t.pid, "name": t.name, "exe": t.exe or "", "score": t.score,
             "protected": bool(t.protected), "reasons": list(t.reasons or []),
             "connections": getattr(t, "connections", None),
@@ -186,6 +191,7 @@ class Engine:
         self.quar = Quarantine(self.cfg.quarantine_dir)
         self._cancel = threading.Event()
         self.scanned_once = False
+        self._uninstallers: dict[str, str] = {}   # uid -> Windows uninstall cmd
 
     def _pick_model(self) -> str:
         """Use an already-installed model if there is one (so we don't ask for a
@@ -308,6 +314,46 @@ class Engine:
             self.store.session_summary_data(), self.model),
             "ready": self.scanned_once}
 
+    def ask_file(self, params):
+        """Answer a free-form question about ONE flagged file, using only its
+        metadata (never its bytes) so it stays a fully-local, no-egress chat."""
+        q = (params.get("question") or "").strip()
+        if not q:
+            return {"text": "Ask a question about this file above."}
+        f = params.get("file") or {}
+        ev = f.get("evidence") or {}
+        context = (
+            f"File name: {f.get('name', '?')}\n"
+            f"Location: {f.get('dir') or f.get('path') or '?'}\n"
+            f"What the scanner matched: {f.get('rule', '?')}\n"
+            f"Severity: {f.get('severity', '?')}\n"
+            f"Kind of finding: {f.get('kind', '?')}\n"
+            f"Where it came from: {f.get('source', '?')}\n"
+            f"Extra details: {f.get('detail') or '(none)'}\n"
+            + (f"Evidence: {', '.join(f'{k}={v}' for k, v in ev.items())}\n"
+               if ev else "")
+        )
+        system = (
+            "You are a friendly helper inside a local, offline antivirus, talking "
+            "to someone who is NOT good with computers. Answer their question "
+            "about this one file using ONLY the facts given — you cannot see the "
+            "file's actual contents. Use short, plain, everyday language and avoid "
+            "technical jargon. Be honest when something is uncertain. If they ask "
+            "whether to delete it, remember Oyster never erases files — it moves "
+            "them to a safe place you can undo."
+        )
+        client = Ollama(self.model)
+        if not client.available():
+            return {"text": "The local AI helper isn't running right now, so I "
+                    "can't answer extra questions. The explanation above still "
+                    "applies, and you can turn the AI on from first-run setup."}
+        try:
+            return {"text": client.generate(
+                prompt=f"Facts about the file:\n{context}\nQuestion: {q}",
+                system=system)}
+        except Exception as e:
+            return {"text": f"(couldn't reach the local AI model: {e})"}
+
     # --- local LLM helpers -------------------------------------------
     def _llm_json(self, system: str, prompt: str) -> dict | None:
         """Ask the local model for a JSON object; None if unavailable/failed."""
@@ -342,6 +388,32 @@ class Engine:
         return organize.execute(params["action"], params.get("paths") or [],
                                 params.get("folder", ""),
                                 params.get("categories"))
+
+    # --- application / program cleanup -------------------------------
+    def apps_scan(self, _):
+        from core import appcleanup
+        res = appcleanup.list_apps(progress=lambda s: _emit("progress", s))
+        # keep Windows uninstall commands engine-side, hand the UI only an id —
+        # the renderer never gets to invoke an arbitrary command line.
+        self._uninstallers = {}
+        for i, a in enumerate(res.get("apps", [])):
+            cmd = a.pop("uninstall", None)
+            if cmd:
+                uid = f"u{i}"
+                self._uninstallers[uid] = cmd
+                a["uid"] = uid
+        return res
+
+    def app_run_uninstaller(self, params):
+        """Windows: launch a program's own (registry-registered) uninstaller."""
+        import subprocess
+        cmd = self._uninstallers.get(params.get("uid", ""))
+        if not cmd:
+            raise ValueError("no uninstaller for this program")
+        subprocess.Popen(cmd, shell=True)   # the program's GUI uninstaller
+        self.store.log_action("uninstall", params.get("name", ""), True,
+                              detail="ran native uninstaller", reversible=False)
+        return {"ok": True}
 
     # --- natural-language assistant (chat box) -----------------------
     def assistant(self, params):
