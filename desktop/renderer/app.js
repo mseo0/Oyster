@@ -23,6 +23,7 @@ const ICON = {
   broom: '<path d="M19.4 4.6 13 11M11 8l5 5M8.5 10.5 3 16c-1 1-1 3 0 4s3 1 4 0l5.5-5.5M4 21l3-1"/>',
   trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>',
   sort: '<path d="M3 6h13M3 12h9M3 18h5M17 9l3 3 3-3M20 12V4"/>',
+  apps: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
 };
 const ic = (k, w = 18) => `<svg width="${w}" height="${w}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICON[k]}</svg>`;
 
@@ -31,6 +32,7 @@ const NAV = [
   { key: 'Processes', icon: 'cpu', sub: 'Running programs, scored by suspicious behaviour.', sec: 'scan' },
   { key: 'Vulnerabilities', icon: 'shield', sub: 'Installed software & OS settings vs. offline CVE data.', sec: 'scan' },
   { key: 'Cleanup', icon: 'broom', sub: 'Find junk, duplicates & clutter — organize with one click.', sec: 'tools' },
+  { key: 'Applications', icon: 'apps', sub: 'Uninstall apps and clear the files they leave behind.', sec: 'tools' },
   { key: 'AI Summary', icon: 'spark', sub: 'A plain-English read-out, written locally just now.', sec: 'report' },
 ];
 
@@ -39,7 +41,8 @@ const S = {
   data: { Files: [], Processes: [], Vulnerabilities: [] },
   sel: { Files: null, Processes: null, Vulnerabilities: null },
   report: null, summary: '', busy: false, scanned: false, downloadedOnly: true,
-  organizeTarget: '~/Downloads', organize: null, procTotal: null,
+  organizeTarget: '~/Downloads', organize: null, procTotal: null, apps: null,
+  findFilter: 'all', appBusy: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -65,6 +68,9 @@ async function init() {
     const n = e.target.closest('[data-page]'); if (n) showPage(n.dataset.page);
   });
   content.addEventListener('click', onContentClick);
+  content.addEventListener('keydown', (e) => {
+    if (e.target.id === 'askfile-in' && e.key === 'Enter') askFile();
+  });
   // gate "Open Settings" (was dead — no listener on the gate element)
   $('gate').addEventListener('click', (e) => {
     if (e.target.closest('[data-action="open-fda"]')) api.openFDA();
@@ -80,9 +86,26 @@ async function init() {
   });
   // cleanup review modal
   $('rv-close').addEventListener('click', closeReview);
+  document.addEventListener('keydown', rvKeyNav);   // arrow up/down through the list
   $('review').addEventListener('click', (e) => {
     if (e.target === $('review')) return closeReview();           // click backdrop
     const rev = e.target.closest('[data-reveal]'); if (rev) return api.reveal(rev.dataset.reveal);
+    // shift-click a checkbox: select/deselect the whole range since the last one
+    const box = e.target.closest('input[type=checkbox]');
+    if (box) {
+      if (e.shiftKey && RV.lastPath) rvSelectRange(RV.lastPath, box.dataset.path, box.checked);
+      RV.lastPath = box.dataset.path;
+      return;   // the change handler updates the single checkbox + count
+    }
+    // tag tabs are multi-select: "All" clears, the rest toggle in/out
+    const tg = e.target.closest('[data-rvtag]');
+    if (tg) {
+      const k = tg.dataset.rvtag;
+      if (k === 'all') RV.tags.clear();
+      else if (RV.tags.has(k)) RV.tags.delete(k);
+      else RV.tags.add(k);
+      return renderReviewBody();
+    }
     const all = e.target.closest('[data-rvall]');
     if (all) {
       const on = all.dataset.rvall === '1';
@@ -198,6 +221,7 @@ function showPage(key) {
   updateNav();
   if (key === 'AI Summary') renderSummary();
   else if (key === 'Cleanup') renderOrganize();
+  else if (key === 'Applications') renderApplications();
   else renderScan();
 }
 
@@ -210,6 +234,7 @@ function renderScan() {
         <div class="strip panel">${strip()}</div>
         <div class="listcard panel">
           <div class="list-head"><span class="t">${listLabel()}</span><span class="r">sorted by severity</span></div>
+          ${S.page === 'Files' ? `<div class="find-tabs" id="find-tabs">${findingTabsHtml()}</div>` : ''}
           <div class="list-body" id="list"></div>
         </div>
       </div>
@@ -276,6 +301,22 @@ function summaryData() {
     stats: [{ v: n, l: 'ISSUES' }, { v: cves, l: 'CVES' }, { v: n - cves, l: 'OTHER' }] };
 }
 
+// per-finding safety recommendation, derived from its severity + suggested
+// action — drives the quick-sort tabs on the Files list.
+function findingTag(f) {
+  if (f.resolved === 'safe' || f.action === 'IGNORE') return 'safe';
+  if (f.action === 'QUARANTINE') return 'act';
+  return 'review';
+}
+function findingTabsHtml() {
+  const items = S.data.Files;
+  const counts = { all: items.length, act: 0, review: 0, safe: 0 };
+  items.forEach((f) => counts[findingTag(f)]++);
+  const tab = (k, label) => (k === 'all' || counts[k])
+    ? `<button class="btn ghost rv-mini rv-tab${S.findFilter === k ? ' on' : ''}" data-action="findtab" data-tag="${k}">${label}${k === 'all' ? '' : ' ' + counts[k]}</button>` : '';
+  return `<span class="rv-tabs">${tab('all', 'All')}${tab('act', '🛡 Act')}${tab('review', '⚠ Review')}${tab('safe', '✓ Looks safe')}</span>`;
+}
+
 function renderRows() {
   const list = $('list'); const items = S.data[S.page];
   if (!items.length) {
@@ -286,7 +327,11 @@ function renderRows() {
     list.innerHTML = `<div class="empty">${msg}</div>`;
     return;
   }
-  list.innerHTML = items.map((o, i) => rowHtml(o, i)).join('');
+  // keep original indices so row selection still maps back to S.data
+  let rows = items.map((o, i) => [o, i]);
+  if (S.page === 'Files' && S.findFilter !== 'all') rows = rows.filter(([o]) => findingTag(o) === S.findFilter);
+  list.innerHTML = rows.map(([o, i]) => rowHtml(o, i)).join('')
+    || `<div class="empty">No findings in this category.</div>`;
 }
 function rowHtml(o, i) {
   const sel = S.sel[S.page] === o ? ' sel' : '';
@@ -338,12 +383,20 @@ function inspectFinding(f, vuln) {
       : `<div class="ins-actions"><button class="btn danger" data-action="quarantine">Quarantine</button>
        <button class="btn ghost" data-action="marksafe">Mark safe</button></div>
        <div class="note-sm">Quarantine is reversible — files move to a vault, never deleted.</div>`);
+  // ask the local AI follow-up questions about this specific file
+  const askai = vuln ? '' : `
+    <div class="section">ASK AI ABOUT THIS FILE</div>
+    <div class="askai">
+      <input id="askfile-in" class="chat-input" placeholder="e.g. “is this safe to delete?” or “what does this file do?”">
+      <button class="btn primary" data-action="askfile">${ic('spark', 14)} Ask</button>
+    </div>
+    <div id="askfile-ans" class="askai-ans"></div>`;
   return `<div><span class="chip" style="background:${tint(c, 0.16)};color:${c}">${sevLabel(f.severity)}</span>
       <span class="kind"> ${esc((f.kind || '').replace(/_/g, ' '))}</span>${srcTag}</div>
     <div class="ins-title">${esc(vuln ? f.rule : f.name)}</div>
     <div class="ins-dir" style="${vuln ? 'color:var(--accent)' : ''}">${esc(vuln ? f.target : f.dir + '/')}</div>
     ${f.detail ? `<p class="ins-detail">${esc(f.detail)}</p>` : ''}
-    ${ai}<div class="section">${vuln ? 'DETAILS' : 'EVIDENCE'}</div>${kvTable(pairs)}${actions}`;
+    ${ai}<div class="section">${vuln ? 'DETAILS' : 'EVIDENCE'}</div>${kvTable(pairs)}${actions}${askai}`;
 }
 function inspectProc(t) {
   const c = procColor(t.score);
@@ -397,6 +450,77 @@ function renderOrganize() {
   if (ci) ci.addEventListener('keydown', (e) => { if (e.key === 'Enter') chatSend(); });
 }
 
+// ---------- Applications cleanup ----------
+function renderApplications() {
+  const a = S.apps;
+  const isWin = a && a.platform && a.platform.startsWith('win');
+  let body;
+  if (!a) {
+    body = `<div class="empty">Scan to list ${isWin ? 'installed programs' : 'installed apps'} and the files they leave behind.</div>`;
+  } else if (a.note) {
+    body = `<div class="empty">${esc(a.note)}</div>`;
+  } else if (!a.apps.length) {
+    body = `<div class="empty">No removable ${isWin ? 'programs' : 'apps'} found.</div>`;
+  } else {
+    const total = a.apps.reduce((s, x) => s + (x.bytes || 0), 0);
+    const cards = a.apps.map((app, i) => {
+      const removing = S.appBusy && app.path === S.appBusy;
+      return `
+      <div class="rec panel${removing ? ' removing' : ''}">
+        <span class="rec-ic" style="color:var(--accent)">${ic('apps', 18)}</span>
+        <div class="rec-x"><div class="rec-t">${esc(app.name)}${app.version ? ` <span class="mono" style="color:var(--muted2);font-size:11px">v${esc(app.version)}</span>` : ''}</div>
+          <div class="rec-d">${esc(app.bundleId || app.path || '')}${app.leftoverCount ? ` · ${app.leftoverCount} leftover item(s) (${esc(app.leftoverHuman)})` : ' · no leftovers found'}${app.used ? ' · last used ' + esc(app.used) : ''}</div></div>
+        ${removing
+          ? `<span class="rec-removing"><span class="spin-sm"></span> Removing…</span>`
+          : `${app.human ? `<div class="rec-sz">${esc(app.human)}</div>` : ''}
+             <button class="btn ghost" data-action="app-review" data-idx="${i}">Review</button>`}
+      </div>`;
+    }).join('');
+    body = `<div class="rec-head">${a.apps.length} ${isWin ? 'program(s)' : 'app(s)'} · ${humanBytes(total)} on disk</div>${cards}`;
+  }
+  content.innerHTML = `
+    <div class="taskbar panel">
+      <div class="field"><span style="color:var(--accent);display:flex">${ic('apps', 16)}</span>
+        <span class="k">${isWin ? 'Programs' : 'Applications'}</span>
+        <span class="v">${a && !a.note ? `${(a.apps || []).length} found` : 'not scanned yet'}</span></div>
+      <button class="btn primary" data-action="apps-scan">${ic('search', 15)} Scan ${isWin ? 'programs' : 'apps'}</button>
+    </div>
+    <div class="cleanup-body">${body}</div>`;
+}
+function humanBytes(n) {
+  for (const u of ['B', 'KB', 'MB', 'GB', 'TB']) {
+    if (n < 1024) return u === 'B' ? `${n} B` : `${n.toFixed(1)} ${u}`;
+    n /= 1024;
+  }
+  return `${n.toFixed(1)} PB`;
+}
+async function appsScan() {
+  if (S.busy) return; S.busy = true; startScanUI('Inspecting installed apps…');
+  try {
+    const r = await api.rpc('apps_scan');
+    S.apps = r;
+    setStatus(r.note ? r.note : `${(r.apps || []).length} item(s) inspected.`);
+  } catch (e) { setStatus('App scan failed: ' + e.message); }
+  endScanUI(); S.busy = false; if (S.page === 'Applications') renderApplications();
+}
+function openAppReview(idx) {
+  const app = S.apps && S.apps.apps[idx]; if (!app) return;
+  const win = !!app.win;
+  // mac: the bundle itself is a movable path; windows: the program is removed
+  // by its own uninstaller, so only the leftover AppData folders are movable.
+  const bundle = { path: app.path, name: win ? app.name : app.name + '.app',
+    human: app.bundleHuman, note: win ? 'removed by its own uninstaller' : 'application',
+    risk: '', important: '', accessed: '' };
+  const items = win ? (app.leftovers || []) : [bundle, ...(app.leftovers || [])];
+  openReview({ kind: 'app', appName: app.name, win, uid: app.uid, appPath: app.path,
+    headerItem: win ? bundle : null,
+    title: (win ? 'Uninstall ' : 'Uninstall ') + app.name,
+    detail: win
+      ? `Removes ${app.name} using its own uninstaller. Any leftover app-data folders below can also be moved to the reversible cleanup vault.`
+      : `${app.name} — ${app.human} total${app.leftoverCount ? ` (${app.leftoverCount} leftover files)` : ''}. Everything moves to the reversible cleanup vault.`,
+    items });
+}
+
 // ---------- review modal ----------
 let RV = null;  // { rec, sel: Set(paths) }
 function openReview(rec) {
@@ -404,30 +528,66 @@ function openReview(rec) {
   if (!rec) return;
   // default selection: safe (non-risky) junk/dup/chat pre-selected; important all
   const sel = new Set();
-  const presafe = (items) => (items || []).forEach((i) => { if (!i.risk) sel.add(i.path); });
+  // default selection follows the suggestion: pre-check only "safe to remove"
+  const presafe = (items) => (items || []).forEach((i) => { if (itemTag(i) === 'remove') sel.add(i.path); });
   if (rec.kind === 'junk' || rec.kind === 'chat') presafe(rec.items);
-  else if (rec.kind === 'important') (rec.items || []).forEach((i) => sel.add(i.path));
-  else if (rec.kind === 'duplicates') (rec.groups || []).forEach((g) => g.copies.forEach((c) => { if (!c.risk) sel.add(c.path); }));
-  RV = { rec, sel };
+  else if (rec.kind === 'important' || rec.kind === 'app') (rec.items || []).forEach((i) => sel.add(i.path));
+  else if (rec.kind === 'duplicates') (rec.groups || []).forEach((g) => g.copies.forEach((c) => { if (itemTag(c) === 'remove') sel.add(c.path); }));
+  RV = { rec, sel, tags: new Set(), lastPath: null };
   $('rv-title').textContent = rec.title;
   $('rv-sub').textContent = rec.detail || '';
   renderReviewBody();
   $('review').classList.remove('hidden');
+  const first = $('rv-list').querySelector('input[type=checkbox]');
+  if (first) first.focus({ preventScroll: true });   // so arrow keys / space work at once
 }
 function closeReview() { $('review').classList.add('hidden'); RV = null; }
 
+// per-file suggestion — combines important/risky/empty/type/who-made-it into a
+// single keep / review / remove recommendation (computed by the engine; the
+// fallback covers items that don't carry one, e.g. app leftovers).
+const SG_COLOR = { remove: '#17A98C', review: '#F5820A', keep: '#8E5BE5' };
+function suggestFallback(i) {
+  if (i.important) return { level: 'keep', label: 'Keep', why: i.important };
+  if (i.risk) return { level: 'review', label: 'Review first', why: i.risk };
+  return { level: 'remove', label: 'Safe to remove', why: '' };
+}
+function suggestOf(i) { return i.suggest || suggestFallback(i); }
+
 function fileRow(i) {
   const checked = RV.sel.has(i.path);
-  const imp = i.important ? `<span class="rv-imp" title="${esc(i.important)}">★ ${esc(i.important)}</span>` : '';
-  const risk = i.risk ? `<span class="rv-risk" title="${esc(i.risk)}">⚠ risky to delete</span>` : '';
-  return `<label class="rv-row${i.risk ? ' risky' : ''}">
+  const sg = suggestOf(i);
+  const col = SG_COLOR[sg.level] || SEV.info;
+  const tag = `<span class="rv-risk" style="color:${col};background:${tint(col, 0.15)}" title="${esc(sg.why || sg.label)}">${esc(sg.label)}</span>`;
+  return `<label class="rv-row${sg.level === 'review' ? ' risky' : ''}">
     <input type="checkbox" data-path="${esc(i.path)}" ${checked ? 'checked' : ''}>
-    <span class="rv-name">${esc(i.name)}</span>${imp}${risk}
-    <span class="rv-meta">${esc(i.human)}${i.accessed ? ' · ' + esc(i.accessed) : ''}</span>
+    <span class="rv-name">${esc(i.name)}</span>${tag}
+    <span class="rv-meta">${esc(i.human)}${i.note ? ' · ' + esc(i.note) : ''}${i.accessed ? ' · ' + esc(i.accessed) : ''}</span>
     <span class="rv-dir" title="${esc(i.path)}">${esc(i.path)}</span>
     <button class="rv-reveal" data-reveal="${esc(i.path)}" title="Reveal in Finder">${ic('search', 14)}</button>
   </label>`;
 }
+// each reviewable file carries one suggestion tag (remove/review/keep). The tag
+// tabs let you focus the list on one or several tags at once (multi-select),
+// and the list is grouped by tag so the same kinds sit together.
+function itemTag(i) { return suggestOf(i).level; }
+const _TAG_ORDER = { remove: 0, review: 1, keep: 2 };
+function applyFilter(items) {
+  const shown = RV.tags.size ? items.filter((i) => RV.tags.has(itemTag(i))) : items;
+  return shown.slice().sort((a, b) =>
+    (_TAG_ORDER[itemTag(a)] - _TAG_ORDER[itemTag(b)]) || ((b.size || 0) - (a.size || 0)));
+}
+function tagTabs(items) {
+  const counts = { remove: 0, review: 0, keep: 0 };
+  items.forEach((i) => counts[itemTag(i)]++);
+  const tab = (key, label, on) => `<button class="btn ghost rv-mini rv-tab${on ? ' on' : ''}" data-rvtag="${key}">${label}${key === 'all' ? '' : ' ' + counts[key]}</button>`;
+  const t = [tab('all', 'All', RV.tags.size === 0)];
+  if (counts.remove) t.push(tab('remove', '✓ Safe', RV.tags.has('remove')));
+  if (counts.review) t.push(tab('review', '⚠ Review', RV.tags.has('review')));
+  if (counts.keep) t.push(tab('keep', '★ Keep', RV.tags.has('keep')));
+  return `<span class="rv-tabs">${t.join('')}</span>`;
+}
+
 function renderReviewBody() {
   const r = RV.rec; const list = $('rv-list'); const tools = $('rv-tools'); const foot = $('rv-foot');
   if (r.kind === 'organize') {
@@ -440,32 +600,83 @@ function renderReviewBody() {
     return;
   }
   if (r.kind === 'duplicates') {
-    tools.innerHTML = `<button class="btn ghost rv-mini" data-rvall="1">Select all copies</button><button class="btn ghost rv-mini" data-rvall="0">None</button><span class="rv-count" id="rv-n"></span>`;
-    list.innerHTML = r.groups.map((g) => `
-      <div class="rv-cat"><div class="rv-cat-h">${ic('folder', 14)} ${g.human} each · ${g.copies.length + 1} identical</div>
+    const copies = r.groups.flatMap((g) => g.copies);
+    tools.innerHTML = `<button class="btn ghost rv-mini" data-rvall="1">Select all copies</button><button class="btn ghost rv-mini" data-rvall="0">None</button>${tagTabs(copies)}<span class="rv-count" id="rv-n"></span>`;
+    list.innerHTML = r.groups.map((g) => {
+      const shown = applyFilter(g.copies);
+      if (!shown.length) return '';   // group has nothing in the active filter
+      return `<div class="rv-cat"><div class="rv-cat-h">${ic('folder', 14)} ${g.human} each · ${g.copies.length + 1} identical</div>
         <div class="rv-row keep"><span class="rv-name">${esc(g.keep.name)}</span><span class="rv-meta">KEEP · newest</span><span class="rv-dir">${esc(g.keep.path)}</span><button class="rv-reveal" data-reveal="${esc(g.keep.path)}">${ic('search', 14)}</button></div>
-        ${g.copies.map((c) => fileRow(c)).join('')}</div>`).join('');
+        ${shown.map((c) => fileRow(c)).join('')}</div>`;
+    }).join('') || `<div class="empty">No copies in this category.</div>`;
     foot.innerHTML = footActions('Delete selected copies', false);
+  } else if (r.kind === 'app') {
+    tools.innerHTML = `<button class="btn ghost rv-mini" data-rvall="1">All</button><button class="btn ghost rv-mini" data-rvall="0">None</button><span class="rv-count" id="rv-n"></span>`;
+    // windows: show the program as a fixed header (its own uninstaller removes
+    // it); the checkable list is the leftover folders we can vault afterwards.
+    const head = r.win && r.headerItem
+      ? `<div class="rv-row keep"><span class="rv-name">${esc(r.headerItem.name)}</span><span class="rv-meta">${esc(r.headerItem.note)}</span></div>` : '';
+    list.innerHTML = head + (r.items || []).map((i) => fileRow(i)).join('')
+      + (r.win && !(r.items || []).length ? '<div class="empty">No leftover folders found — the uninstaller handles everything.</div>' : '');
+    foot.innerHTML = `<span class="rv-foot-msg">${r.win
+      ? 'Runs the program’s own uninstaller; any selected app-data folders move to the reversible cleanup vault.'
+      : 'Everything moves to the reversible cleanup vault in ~/.oyster/cleanup — restore it if you change your mind.'}</span>
+      <button class="btn danger" data-rvaction="uninstall">${ic('trash', 15)} Uninstall ${esc(r.appName)}</button>`;
   } else if (r.kind === 'important') {
     tools.innerHTML = `<button class="btn ghost rv-mini" data-rvall="1">All</button><button class="btn ghost rv-mini" data-rvall="0">None</button><span class="rv-count" id="rv-n"></span>`;
     list.innerHTML = (r.items || []).map((i) => fileRow(i)).join('');
     foot.innerHTML = `<span class="rv-foot-msg">These are kept out of every cleanup suggestion. Move them somewhere safe.</span>
       <button class="btn primary" data-rvaction="important">${ic('shield', 15)} Move to Important folder</button>`;
   } else {  // junk / large / stale / chat
-    tools.innerHTML = `<button class="btn ghost rv-mini" data-rvall="1">All</button><button class="btn ghost rv-mini" data-rvall="0">None</button><span class="rv-count" id="rv-n"></span>`;
-    list.innerHTML = (r.items || []).map((i) => fileRow(i)).join('');
+    const shown = applyFilter(r.items || []);
+    tools.innerHTML = `<button class="btn ghost rv-mini" data-rvall="1">All</button><button class="btn ghost rv-mini" data-rvall="0">None</button>${tagTabs(r.items || [])}<span class="rv-count" id="rv-n"></span>`;
+    list.innerHTML = shown.map((i) => fileRow(i)).join('') || `<div class="empty">No files in this category.</div>`;
     const archive = r.kind === 'large' || r.kind === 'stale' || r.kind === 'chat';
     foot.innerHTML = footActions(r.deleteLabel || 'Delete selected', archive);
   }
   updateRvCount();
 }
 function footActions(deleteLabel, archive) {
-  return `<span class="rv-foot-msg">Reversible — “delete” moves to a restorable vault in ~/.oyster/cleanup. Risky files are deselected.</span>
+  return `<span class="rv-foot-msg">Reversible — “delete” moves to a restorable vault in ~/.oyster/cleanup. Only files we suggest removing are pre-selected.</span>
     ${archive ? `<button class="btn ghost" data-rvaction="archive">${ic('folder', 15)} Move to archive</button>` : ''}
     <button class="btn danger" data-rvaction="delete">${ic('trash', 15)} ${deleteLabel}</button>`;
 }
 function updateRvCount() {
   const el = $('rv-n'); if (el) el.textContent = `${RV.sel.size} selected`;
+}
+// arrow keys move up/down the review list; hold Shift to extend the selection
+// as you go, Space (native) toggles the focused row.
+function rvKeyNav(e) {
+  if (!RV || $('review').classList.contains('hidden')) return;
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+  const boxes = [...$('rv-list').querySelectorAll('input[type=checkbox]')];
+  if (!boxes.length) return;
+  e.preventDefault();
+  const idx = boxes.indexOf(document.activeElement);
+  const next = e.key === 'ArrowDown'
+    ? Math.min((idx < 0 ? -1 : idx) + 1, boxes.length - 1)
+    : Math.max((idx < 0 ? boxes.length : idx) - 1, 0);
+  const b = boxes[next];
+  b.focus({ preventScroll: true });
+  b.scrollIntoView({ block: 'nearest' });
+  if (e.shiftKey) {   // extend selection while arrowing, like shift-click
+    b.checked = true; RV.sel.add(b.dataset.path); RV.lastPath = b.dataset.path;
+    updateRvCount();
+  }
+}
+
+// shift-click range select: set every checkbox between two rows to `checked`
+function rvSelectRange(fromPath, toPath, checked) {
+  const boxes = [...$('rv-list').querySelectorAll('input[type=checkbox]')];
+  const paths = boxes.map((b) => b.dataset.path);
+  let a = paths.indexOf(fromPath), b = paths.indexOf(toPath);
+  if (a < 0 || b < 0) return;
+  if (a > b) [a, b] = [b, a];
+  for (let k = a; k <= b; k++) {
+    boxes[k].checked = checked;
+    checked ? RV.sel.add(paths[k]) : RV.sel.delete(paths[k]);
+  }
+  updateRvCount();
 }
 
 // ---------- AI summary ----------
@@ -501,6 +712,7 @@ async function onContentClick(e) {
   const t = e.target.closest('[data-action]'); if (!t) return;
   const a = t.dataset.action;
   if (a === 'select') { S.sel[S.page] = S.data[S.page][+t.dataset.idx]; renderRows(); renderInspector(); return; }
+  if (a === 'findtab') { S.findFilter = t.dataset.tag; const tb = $('find-tabs'); if (tb) tb.innerHTML = findingTabsHtml(); renderRows(); return; }
   if (a === 'open-fda') return api.openFDA();
   if (a === 'toggle-downloaded') { S.downloadedOnly = !S.downloadedOnly; renderScan(); return; }
   if (a === 'choose') { const d = await api.chooseFolder(); if (d) { S.target = d; const el = $('target'); if (el) el.textContent = d; } return; }
@@ -511,12 +723,27 @@ async function onContentClick(e) {
   if (a === 'update-defs') return updateDefs();
   if (a === 'quarantine') return quarantine();
   if (a === 'marksafe') return markSafe();
+  if (a === 'askfile') return askFile();
   if (a === 'suspend') return procAction('suspend');
   if (a === 'kill') return procAction('kill');
   if (a === 'organize-choose') { const d = await api.chooseFolder(); if (d) { S.organizeTarget = d; const el = $('org-target'); if (el) el.textContent = d; } return; }
   if (a === 'organize-analyze') return organizeAnalyze();
   if (a === 'review') return openReview(t.dataset.key);
   if (a === 'chat-send') return chatSend();
+  if (a === 'apps-scan') return appsScan();
+  if (a === 'app-review') return openAppReview(+t.dataset.idx);
+}
+
+async function askFile() {
+  const f = S.sel.Files; if (!f) return;
+  const inp = $('askfile-in'); const q = inp && inp.value.trim(); if (!q) return;
+  const ans = $('askfile-ans'); if (ans) ans.textContent = 'Thinking… (running locally)';
+  try {
+    const r = await api.rpc('ask_file', { question: q, file: {
+      name: f.name, dir: f.dir, path: f.target, rule: f.rule, severity: f.severity,
+      kind: f.kind, detail: f.detail, source: f.source, evidence: f.evidence } });
+    if ($('askfile-ans')) $('askfile-ans').textContent = r.text;
+  } catch (e) { if ($('askfile-ans')) $('askfile-ans').textContent = 'Could not get an answer: ' + e.message; }
 }
 
 async function chatSend() {
@@ -545,19 +772,33 @@ async function reviewExecute(action) {
   const r = RV.rec;
   let paths = [...RV.sel];
   if (action === 'organize') paths = [];
+  if (action === 'uninstall') return uninstallApp(r, paths);
   if (action !== 'organize' && !paths.length) { setStatus('Nothing selected.'); return; }
-  // safety: warn if a risky-to-delete file is being removed
-  let warn = '';
-  if (action === 'delete') {
+  // safety: a dedicated, explicit warning if any "risky to delete" file is in
+  // the selection — these may belong to a program and removing them can break it.
+  if (action === 'delete' || action === 'archive') {
     const items = r.groups ? r.groups.flatMap((g) => g.copies) : (r.items || []);
     const risky = items.filter((i) => paths.includes(i.path) && i.risk);
-    if (risky.length) warn = `\n\n⚠ ${risky.length} selected file(s) may belong to a program (${risky[0].risk}). Deleting could break it.`;
+    if (risky.length) {
+      const names = risky.slice(0, 6).map((i) => `• ${i.name} — ${i.risk}`).join('\n')
+        + (risky.length > 6 ? `\n…and ${risky.length - 6} more.` : '');
+      const w = await api.confirm({
+        type: 'warning',
+        message: `⚠ ${risky.length} risky-to-delete file(s) selected`,
+        detail: 'These look like they belong to a program or the system — removing '
+          + 'them could stop software from working:\n\n' + names
+          + '\n\nThey move to a reversible vault (not erased), but only continue if '
+          + 'you are sure you want to touch them.',
+        buttons: ['Cancel', 'I understand — continue'],
+      });
+      if (w !== 1) { setStatus('Cancelled — risky files were kept.'); return; }
+    }
   }
   const verb = action === 'organize' ? `Organize ${r.count} files into folders`
     : action === 'important' ? `Move ${paths.length} important file(s) to the Important folder`
     : action === 'archive' ? `Move ${paths.length} file(s) to the archive folder`
     : `Move ${paths.length} file(s) to the reversible cleanup vault`;
-  const c = await api.confirm({ message: r.title, detail: verb + warn +
+  const c = await api.confirm({ message: r.title, detail: verb +
     '\n\nNothing is permanently deleted — everything moves and can be restored.',
     buttons: ['Cancel', action === 'organize' ? 'Organize' : action === 'important' ? 'Move' : action === 'archive' ? 'Archive' : 'Delete'] });
   if (c !== 1) return;
@@ -571,6 +812,36 @@ async function reviewExecute(action) {
     const re = await api.rpc('organize_scan', { path: S.organizeTarget });
     S.organize = re; if (S.page === 'Cleanup') renderOrganize();
   } catch (e) { setStatus('Cleanup failed: ' + e.message); }
+}
+
+async function uninstallApp(r, paths) {
+  const c = await api.confirm({
+    type: 'warning', message: `Uninstall ${r.appName}?`,
+    detail: r.win
+      ? `This will open ${r.appName}'s own uninstaller`
+        + (paths.length ? ` and move ${paths.length} leftover folder(s) to the reversible cleanup vault.` : '.')
+        + '\n\nFollow the uninstaller’s prompts to finish removing the program.'
+      : `Move ${r.appName} and ${Math.max(0, paths.length - 1)} leftover file(s) to the reversible cleanup vault.`
+        + '\n\nNothing is permanently deleted — it can be restored from ~/.oyster/cleanup.',
+    buttons: ['Cancel', `Uninstall ${r.appName}`] });
+  if (c !== 1) return;
+  // close the modal and show a spinner on the app's card while it's removed
+  closeReview();
+  S.appBusy = r.appPath; renderApplications();
+  setStatus(`Removing ${r.appName}…`);
+  try {
+    if (r.win) {
+      await api.rpc('app_run_uninstaller', { uid: r.uid, name: r.appName });
+      if (paths.length) await api.rpc('organize_execute', { action: 'delete', paths });
+      setStatus(`Launched ${r.appName}'s uninstaller${paths.length ? ` · moved ${paths.length} leftover folder(s)` : ''}.`);
+    } else {
+      const res = await api.rpc('organize_execute', { action: 'delete', paths });
+      setStatus(`Uninstalled ${r.appName} · moved ${res.moved} item(s)` + (res.human ? ` · freed ${res.human}` : '') + (res.errors ? ` · ${res.errors} skipped` : '') + '.');
+    }
+    const re = await api.rpc('apps_scan'); S.apps = re;
+  } catch (e) { setStatus('Uninstall failed: ' + e.message); }
+  S.appBusy = null;
+  if (S.page === 'Applications') renderApplications();
 }
 
 async function runScan(method, params) {
@@ -699,10 +970,12 @@ function startScanUI(label) {
   scan = { start: Date.now(), count: 0, total: 0, timer: null, active: true, label, canceling: false };
   $('scanbar').classList.remove('hidden'); paintScanBar();
   scan.timer = setInterval(paintScanBar, 250);
+  if (api.setBusy) api.setBusy(true);   // let main warn before quitting mid-scan
 }
 function endScanUI() {
   scan.active = false; if (scan.timer) clearInterval(scan.timer);
   $('scanbar').classList.add('hidden');
+  if (api.setBusy) api.setBusy(false);
 }
 function onProgress(text) {
   setStatus(text);

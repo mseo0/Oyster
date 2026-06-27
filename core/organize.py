@@ -12,9 +12,12 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from core import provenance
 
 CATEGORIES = {
     "Images": {".jpg", ".jpeg", ".png", ".gif", ".heic", ".webp", ".tiff", ".bmp", ".svg"},
@@ -58,7 +61,21 @@ _IMPORTANT_KW = {
 }
 
 
+# Extensions that are never a "personally important document", even when the
+# filename matches an important keyword. e.g. resume.pdf is a resume worth
+# keeping, but resume.jsx / resume.py is just source code named after one.
+_NEVER_IMPORTANT_EXT = CATEGORIES["Code"] | {
+    ".jsx", ".tsx", ".mjs", ".cjs", ".vue", ".svelte", ".rb", ".php", ".swift",
+    ".kt", ".scala", ".cs", ".h", ".hpp", ".m", ".mm", ".scss", ".less", ".sql",
+    ".yml", ".yaml", ".toml", ".xml", ".map", ".lock", ".o", ".a", ".class",
+    ".pyc", ".pyo", ".obj", ".dll", ".so", ".dylib", ".bin", ".tmp", ".temp",
+    ".cache", ".log",
+}
+
+
 def important_reason(name: str) -> str:
+    if Path(name).suffix.lower() in _NEVER_IMPORTANT_EXT:
+        return ""                        # file type rules it out (see above)
     tokens = set(re.split(r"[^a-z0-9]+", name.lower()))
     for kw, reason in _IMPORTANT_KW.items():
         if kw in tokens:                 # exact token (handles short kws: w2, id)
@@ -94,6 +111,51 @@ def delete_risk(path: str) -> str:
     return ""
 
 
+# Types a person almost never authors by hand and can usually re-create / re-
+# download — installers, disk images and partial downloads lean "safe to
+# remove" even without download provenance. (Generic archives like .zip are
+# left out on purpose: those can be the user's own work, so they fall through
+# to the user-created vs downloaded check below.)
+_DISPOSABLE_EXT = _JUNK_EXTS | {
+    ".dmg", ".pkg", ".iso", ".crdownload", ".download", ".part", ".bak", ".old"}
+
+
+def suggest_tag(info: dict, source: str = "") -> dict:
+    """One combined 'what should I do' suggestion per file.
+
+    Folds together everything we know — is it personally important, could
+    removing it break a program, is it empty/broken, what type it is, and
+    whether the user made it here vs downloaded it — into a single level
+    (keep / review / remove) with a short reason. This is what the UI tags
+    each file with and lets you filter by.
+    """
+    name = info.get("name", "")
+    ext = Path(name).suffix.lower()
+    size = info.get("size", 0)
+    if info.get("important"):
+        return _sg("keep", "Keep", info["important"])
+    if info.get("risk"):
+        return _sg("review", "Review first", info["risk"])
+    if size == 0:
+        return _sg("remove", "Safe to remove", "empty or broken file (0 bytes)")
+    if name.lower() in _JUNK_NAMES or ext in _JUNK_EXTS:
+        return _sg("remove", "Safe to remove", "temporary or cache file")
+    if ext in _DISPOSABLE_EXT:
+        return _sg("remove", "Likely safe to remove",
+                   "installer/disk image you can usually get again")
+    if source == "user-created":
+        return _sg("keep", "Probably keep",
+                   "you made this on this computer — not downloaded")
+    if source == "downloaded":
+        return _sg("remove", "Likely safe to remove",
+                   "downloaded — you can usually download it again")
+    return _sg("review", "Review first", "no strong signal either way")
+
+
+def _sg(level: str, label: str, why: str) -> dict:
+    return {"level": level, "label": label, "why": why}
+
+
 def _human(n: float) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024:
@@ -113,16 +175,22 @@ def _category(p: Path) -> str:
 def _info(p: Path, st=None) -> dict:
     try:
         st = st or p.stat()
-        return {"path": str(p), "name": p.name, "size": st.st_size,
+        info = {"path": str(p), "name": p.name, "size": st.st_size,
                 "human": _human(st.st_size),
                 "modified": _date(st.st_mtime), "accessed": _date(st.st_atime),
                 "atime": st.st_atime,
                 "important": important_reason(p.name),
                 "risk": delete_risk(str(p))}
+        source = provenance.source_label(str(p))
+        info["source"] = source
+        info["suggest"] = suggest_tag(info, source)
+        return info
     except OSError:
-        return {"path": str(p), "name": p.name, "size": 0, "human": "0 B",
+        info = {"path": str(p), "name": p.name, "size": 0, "human": "0 B",
                 "modified": "", "accessed": "", "atime": 0,
-                "important": "", "risk": ""}
+                "important": "", "risk": "", "source": ""}
+        info["suggest"] = suggest_tag(info, "")
+        return info
 
 
 def _date(ts: float) -> str:
@@ -180,7 +248,8 @@ def analyze(folder: str, progress=lambda s: None,
         try:
             flagged = classify_important([i["name"] for i in cand][:120]) or set()
             for i in cand:
-                if i["name"] in flagged:
+                if (i["name"] in flagged and
+                        Path(i["name"]).suffix.lower() not in _NEVER_IMPORTANT_EXT):
                     i["important"] = "AI: looks personally important"
         except Exception:
             pass
@@ -296,10 +365,10 @@ def _dup_groups(by_size: dict, progress, imp: set | None = None) -> list:
         for d, dup in seen.items():
             if len(dup) < 2:
                 continue
-            dup.sort(key=lambda p: p.stat().st_mtime, reverse=True)  # newest = keep
+            dup.sort(key=lambda p: p.stat().st_mtime)  # newest (last) = keep
             groups.append({"size": size, "human": _human(size),
-                           "keep": _info(dup[0]),
-                           "copies": [_info(x) for x in dup[1:]]})
+                           "keep": _info(dup[-1]),
+                           "copies": [_info(x) for x in dup[:-1]]})
     groups.sort(key=lambda g: -g["size"] * len(g["copies"]))
     return groups
 
@@ -389,11 +458,33 @@ def execute(action: str, paths: list[str], folder: str = "",
     for f in paths:
         src = Path(f)
         try:
-            sz = src.stat().st_size
-            src.rename(_unique(dest_dir / src.name))
+            sz = _tree_size(src)
+            dest = _unique(dest_dir / src.name)
+            try:
+                src.rename(dest)
+            except OSError:
+                shutil.move(str(src), str(dest))   # across volumes (e.g. /Applications)
             moved += 1
             freed += sz
         except OSError:
             errors += 1
     return {"moved": moved, "errors": errors, "freed": freed,
             "human": _human(freed), "dest": str(dest_dir)}
+
+
+def _tree_size(p: Path) -> int:
+    """Bytes for a file or a whole directory tree (so freed-space is accurate
+    when a moved item is a folder, e.g. a .app bundle)."""
+    try:
+        if p.is_file() or p.is_symlink():
+            return p.lstat().st_size
+    except OSError:
+        return 0
+    total = 0
+    for dp, _dn, fns in os.walk(p):
+        for fn in fns:
+            try:
+                total += (Path(dp) / fn).lstat().st_size
+            except OSError:
+                pass
+    return total
