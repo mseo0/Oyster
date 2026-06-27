@@ -7,5 +7,6 @@ contextBridge.exposeInMainWorld('oyster', {
   confirm: (opts) => ipcRenderer.invoke('confirm', opts),
   openFDA: () => ipcRenderer.invoke('open-fda'),
   setTheme: (mode) => ipcRenderer.invoke('set-theme', mode),
+  reveal: (p) => ipcRenderer.invoke('reveal', p),
   onEvent: (cb) => ipcRenderer.on('engine-event', (_e, msg) => cb(msg)),
 });

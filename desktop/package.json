@@ -18,19 +18,38 @@
     "productName": "Oyster",
     "files": ["electron/**", "renderer/**"],
     "extraResources": [
-      { "from": "../dist/oyster-engine", "to": "engine/oyster-engine" }
+      { "from": "../dist/oyster-engine", "to": "engine/oyster-engine" },
+      { "from": "resources/clamav", "to": "clamav" }
     ],
     "mac": {
       "category": "public.app-category.utilities",
       "target": ["dmg"],
       "icon": "../branding/Oyster.icns",
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
       "identity": null,
       "hardenedRuntime": false,
       "gatekeeperAssess": false
     },
+    "dmg": {
+      "title": "Install Oyster",
+      "contents": [
+        { "x": 140, "y": 200, "type": "file" },
+        { "x": 400, "y": 200, "type": "link", "path": "/Applications" }
+      ],
+      "window": { "width": 540, "height": 380 }
+    },
     "win": {
       "target": ["nsis"],
-      "icon": "../branding/oyster.ico"
+      "icon": "../branding/oyster.ico",
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Oyster"
     }
   }
 }

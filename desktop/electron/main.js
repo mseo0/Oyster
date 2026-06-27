@@ -120,6 +120,8 @@ ipcMain.handle('open-fda', () => {
 // drive the native window appearance from the in-app Light/Dark toggle so the
 // vibrancy material (frosted glass) matches — otherwise light mode stays dark.
 ipcMain.handle('set-theme', (_e, mode) => { nativeTheme.themeSource = mode; });
+// reveal a file in Finder/Explorer so the user can review it
+ipcMain.handle('reveal', (_e, p) => { try { shell.showItemInFolder(p); } catch {} });
 
 app.whenReady().then(() => {
   try { nativeTheme.themeSource = 'dark'; } catch (e) { dbg('theme ' + e); }

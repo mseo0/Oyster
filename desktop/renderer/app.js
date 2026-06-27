@@ -46,6 +46,7 @@ async function init() {
   buildNav();
   $('gate-recheck').addEventListener('click', refreshGate);
   $('gate-launch').addEventListener('click', launch);
+  $('gate-setup').addEventListener('click', runSetup);
   document.querySelectorAll('.seg-btn').forEach((b) =>
     b.addEventListener('click', () => setMode(b.dataset.mode)));
   document.querySelector('.sidebar').addEventListener('click', (e) => {
@@ -60,6 +61,26 @@ async function init() {
   $('scanbar').addEventListener('click', (e) => {
     if (e.target.closest('[data-action="stop"]')) { api.rpc('cancel'); setStatus('Stopping…'); }
   });
+  // cleanup review modal
+  $('rv-close').addEventListener('click', closeReview);
+  $('review').addEventListener('click', (e) => {
+    if (e.target === $('review')) return closeReview();           // click backdrop
+    const rev = e.target.closest('[data-reveal]'); if (rev) return api.reveal(rev.dataset.reveal);
+    const all = e.target.closest('[data-rvall]');
+    if (all) {
+      const on = all.dataset.rvall === '1';
+      $('rv-list').querySelectorAll('input[type=checkbox]').forEach((cb) => {
+        cb.checked = on; on ? RV.sel.add(cb.dataset.path) : RV.sel.delete(cb.dataset.path);
+      });
+      return updateRvCount();
+    }
+    const act = e.target.closest('[data-rvaction]'); if (act) return reviewExecute(act.dataset.rvaction);
+  });
+  $('review').addEventListener('change', (e) => {
+    const cb = e.target.closest('input[type=checkbox]'); if (!cb || !RV) return;
+    cb.checked ? RV.sel.add(cb.dataset.path) : RV.sel.delete(cb.dataset.path);
+    updateRvCount();
+  });
   api.onEvent((m) => {
     if (m.event === 'progress') onProgress(m.data);
     else if (m.event === 'total') { scan.total = m.data; }
@@ -73,12 +94,32 @@ async function init() {
 }
 
 let gateTimer = null;
+let setupActive = false, setupOffered = false;
 async function gateLoop() {
   const blocked = await refreshGate();
-  if (blocked === 0) { launch(); return; }
-  // keep polling so that as soon as the user grants Full Disk Access in
-  // Settings, the app proceeds on its own — no need to click anything.
-  gateTimer = setTimeout(gateLoop, 1500);
+  if (blocked > 0) { gateTimer = setTimeout(gateLoop, 1500); return; }
+  // required checks pass — but on first run, offer one-click setup of the
+  // scanning definitions + AI model before launching.
+  if (!setupOffered) {
+    let st = null; try { st = await api.rpc('setup_status'); } catch (e) {}
+    if (st && (st.cve === 0 || (st.ollama && !st.modelReady) || !st.clamav)) {
+      setupOffered = true;
+      $('gate-setup').classList.remove('hidden');
+      $('gate-launch').textContent = 'Skip & launch';
+      $('gate-msg').textContent = 'Optional: download virus & CVE definitions and a local AI model.';
+      $('gate-msg').style.color = 'var(--muted)';
+      return;   // wait for the user to choose Set up or Skip
+    }
+  }
+  launch();
+}
+async function runSetup() {
+  setupActive = true;
+  $('gate-setup').disabled = true; $('gate-recheck').disabled = true;
+  try { await api.rpc('setup_run'); $('gate-msg').textContent = 'Setup complete.'; }
+  catch (e) { $('gate-msg').textContent = 'Setup issue: ' + e.message; }
+  setupActive = false;
+  launch();
 }
 
 // ---------- preflight gate ----------
@@ -179,6 +220,7 @@ function taskbar() {
   }
   const n = S.data.Vulnerabilities.length;
   return `<div class="tb-info">${n ? n + ' issue(s) found' : 'Audit installed software + OS posture'}</div>
+    <button class="btn ghost" data-action="update-defs">${ic('refresh', 15)} Update definitions</button>
     <button class="btn primary" data-action="audit">${ic('shield', 15)} Audit software & OS</button>`;
 }
 
@@ -305,7 +347,7 @@ function inspectProc(t) {
 }
 
 // ---------- Cleanup / Organize ----------
-const ORG_ICON = { organize: 'sort', junk: 'trash', duplicates: 'folder', large: 'deep', stale: 'refresh' };
+const ORG_ICON = { important: 'shield', organize: 'sort', junk: 'trash', duplicates: 'folder', large: 'deep', stale: 'refresh' };
 function renderOrganize() {
   const o = S.organize;
   const recs = o ? o.recs.map((r) => `
@@ -313,8 +355,8 @@ function renderOrganize() {
       <span class="rec-ic" style="color:var(--accent)">${ic(ORG_ICON[r.kind] || 'broom', 18)}</span>
       <div class="rec-x"><div class="rec-t">${esc(r.title)}</div><div class="rec-d">${esc(r.detail)}</div></div>
       ${r.human ? `<div class="rec-sz">${r.human}</div>` : ''}
-      <button class="btn ${r.kind === 'organize' ? 'primary' : 'ghost'}" data-action="organize-apply" data-key="${r.key}">
-        ${r.kind === 'organize' ? 'Organize' : 'Clean up'}</button>
+      <button class="btn ${r.kind === 'organize' || r.kind === 'important' ? 'primary' : 'ghost'}" data-action="review" data-key="${r.key}">
+        ${r.kind === 'organize' ? 'Review plan' : r.kind === 'important' ? 'Set aside' : 'Review'}</button>
     </div>`).join('') : '';
   const body = !o
     ? `<div class="empty">Choose a folder and Analyze to get cleanup recommendations.</div>`
@@ -328,7 +370,85 @@ function renderOrganize() {
       <button class="btn ghost" data-action="organize-choose">Choose…</button>
       <button class="btn primary" data-action="organize-analyze">${ic('search', 15)} Analyze</button>
     </div>
+    <div class="chatbar panel">
+      <span style="color:var(--accent);display:flex">${ic('spark', 16)}</span>
+      <input id="chat-in" class="chat-input" placeholder="Ask Oyster… e.g. “remove all files with ENGE in the name” or “archive PDFs older than a year”">
+      <button class="btn primary" data-action="chat-send">Ask</button>
+    </div>
     <div class="cleanup-body">${body}</div>`;
+  const ci = $('chat-in');
+  if (ci) ci.addEventListener('keydown', (e) => { if (e.key === 'Enter') chatSend(); });
+}
+
+// ---------- review modal ----------
+let RV = null;  // { rec, sel: Set(paths) }
+function openReview(rec) {
+  if (typeof rec === 'string') rec = S.organize && S.organize.recs.find((r) => r.key === rec);
+  if (!rec) return;
+  // default selection: safe (non-risky) junk/dup/chat pre-selected; important all
+  const sel = new Set();
+  const presafe = (items) => (items || []).forEach((i) => { if (!i.risk) sel.add(i.path); });
+  if (rec.kind === 'junk' || rec.kind === 'chat') presafe(rec.items);
+  else if (rec.kind === 'important') (rec.items || []).forEach((i) => sel.add(i.path));
+  else if (rec.kind === 'duplicates') (rec.groups || []).forEach((g) => g.copies.forEach((c) => { if (!c.risk) sel.add(c.path); }));
+  RV = { rec, sel };
+  $('rv-title').textContent = rec.title;
+  $('rv-sub').textContent = rec.detail || '';
+  renderReviewBody();
+  $('review').classList.remove('hidden');
+}
+function closeReview() { $('review').classList.add('hidden'); RV = null; }
+
+function fileRow(i) {
+  const checked = RV.sel.has(i.path);
+  const imp = i.important ? `<span class="rv-imp" title="${esc(i.important)}">★ ${esc(i.important)}</span>` : '';
+  const risk = i.risk ? `<span class="rv-risk" title="${esc(i.risk)}">⚠ risky to delete</span>` : '';
+  return `<label class="rv-row${i.risk ? ' risky' : ''}">
+    <input type="checkbox" data-path="${esc(i.path)}" ${checked ? 'checked' : ''}>
+    <span class="rv-name">${esc(i.name)}</span>${imp}${risk}
+    <span class="rv-meta">${esc(i.human)}${i.accessed ? ' · ' + esc(i.accessed) : ''}</span>
+    <span class="rv-dir" title="${esc(i.path)}">${esc(i.path)}</span>
+    <button class="rv-reveal" data-reveal="${esc(i.path)}" title="Reveal in Finder">${ic('search', 14)}</button>
+  </label>`;
+}
+function renderReviewBody() {
+  const r = RV.rec; const list = $('rv-list'); const tools = $('rv-tools'); const foot = $('rv-foot');
+  if (r.kind === 'organize') {
+    tools.innerHTML = `<span class="rv-count">${r.count} files → ${Object.keys(r.categories).length} folders</span>`;
+    list.innerHTML = Object.entries(r.categories).map(([cat, items]) => `
+      <div class="rv-cat"><div class="rv-cat-h">${ic('folder', 14)} ${esc(cat)} <span>${items.length}</span></div>
+      ${items.slice(0, 200).map((i) => `<div class="rv-row static"><span class="rv-name">${esc(i.name)}</span><span class="rv-meta">${esc(i.human)}</span></div>`).join('')}</div>`).join('');
+    foot.innerHTML = `<span class="rv-foot-msg">Moves each file into a same-folder subfolder by type.</span>
+      <button class="btn primary" data-rvaction="organize">${ic('sort', 15)} Organize into folders</button>`;
+    return;
+  }
+  if (r.kind === 'duplicates') {
+    tools.innerHTML = `<button class="btn ghost rv-mini" data-rvall="1">Select all copies</button><button class="btn ghost rv-mini" data-rvall="0">None</button><span class="rv-count" id="rv-n"></span>`;
+    list.innerHTML = r.groups.map((g) => `
+      <div class="rv-cat"><div class="rv-cat-h">${ic('folder', 14)} ${g.human} each · ${g.copies.length + 1} identical</div>
+        <div class="rv-row keep"><span class="rv-name">${esc(g.keep.name)}</span><span class="rv-meta">KEEP · oldest</span><span class="rv-dir">${esc(g.keep.path)}</span><button class="rv-reveal" data-reveal="${esc(g.keep.path)}">${ic('search', 14)}</button></div>
+        ${g.copies.map((c) => fileRow(c)).join('')}</div>`).join('');
+    foot.innerHTML = footActions('Delete selected copies', false);
+  } else if (r.kind === 'important') {
+    tools.innerHTML = `<button class="btn ghost rv-mini" data-rvall="1">All</button><button class="btn ghost rv-mini" data-rvall="0">None</button><span class="rv-count" id="rv-n"></span>`;
+    list.innerHTML = (r.items || []).map((i) => fileRow(i)).join('');
+    foot.innerHTML = `<span class="rv-foot-msg">These are kept out of every cleanup suggestion. Move them somewhere safe.</span>
+      <button class="btn primary" data-rvaction="important">${ic('shield', 15)} Move to Important folder</button>`;
+  } else {  // junk / large / stale / chat
+    tools.innerHTML = `<button class="btn ghost rv-mini" data-rvall="1">All</button><button class="btn ghost rv-mini" data-rvall="0">None</button><span class="rv-count" id="rv-n"></span>`;
+    list.innerHTML = (r.items || []).map((i) => fileRow(i)).join('');
+    const archive = r.kind === 'large' || r.kind === 'stale' || r.kind === 'chat';
+    foot.innerHTML = footActions(r.deleteLabel || 'Delete selected', archive);
+  }
+  updateRvCount();
+}
+function footActions(deleteLabel, archive) {
+  return `<span class="rv-foot-msg">Reversible — “delete” moves to a restorable vault in ~/.oyster/cleanup. Risky files are deselected.</span>
+    ${archive ? `<button class="btn ghost" data-rvaction="archive">${ic('folder', 15)} Move to archive</button>` : ''}
+    <button class="btn danger" data-rvaction="delete">${ic('trash', 15)} ${deleteLabel}</button>`;
+}
+function updateRvCount() {
+  const el = $('rv-n'); if (el) el.textContent = `${RV.sel.size} selected`;
 }
 
 // ---------- AI summary ----------
@@ -371,13 +491,29 @@ async function onContentClick(e) {
   if (a === 'deep') return deepScan();
   if (a === 'sweep') return sweep();
   if (a === 'audit') return audit();
+  if (a === 'update-defs') return updateDefs();
   if (a === 'quarantine') return quarantine();
   if (a === 'marksafe') return markSafe();
   if (a === 'suspend') return procAction('suspend');
   if (a === 'kill') return procAction('kill');
   if (a === 'organize-choose') { const d = await api.chooseFolder(); if (d) { S.organizeTarget = d; const el = $('org-target'); if (el) el.textContent = d; } return; }
   if (a === 'organize-analyze') return organizeAnalyze();
-  if (a === 'organize-apply') return organizeApply(t.dataset.key);
+  if (a === 'review') return openReview(t.dataset.key);
+  if (a === 'chat-send') return chatSend();
+}
+
+async function chatSend() {
+  const inp = $('chat-in'); const prompt = inp && inp.value.trim(); if (!prompt) return;
+  if (S.busy) return; S.busy = true; setStatus('Asking Oyster…');
+  try {
+    const r = await api.rpc('assistant', { prompt, folder: S.organizeTarget });
+    setStatus(`${r.count} file(s) match · ${r.human}.`);
+    if (!r.count) { setStatus(`No files matched “${prompt}”.`); S.busy = false; return; }
+    openReview({ kind: 'chat', title: r.summary,
+      detail: `${r.count} files (${r.human}) in ${r.folder}. Review and confirm — nothing happens without your OK.`,
+      items: r.files, count: r.count, deleteLabel: 'Delete selected' });
+  } catch (e) { setStatus('Assistant failed: ' + e.message); }
+  S.busy = false;
 }
 
 async function organizeAnalyze() {
@@ -388,26 +524,37 @@ async function organizeAnalyze() {
   } catch (e) { setStatus('Analyze failed: ' + e.message); }
   endScanUI(); S.busy = false; if (S.page === 'Cleanup') renderOrganize();
 }
-async function organizeApply(key) {
-  const rec = S.organize && S.organize.recs.find((r) => r.key === key); if (!rec) return;
-  const verb = rec.kind === 'organize' ? 'Organize into type folders'
-    : `Move ${rec.count} file(s) to a reversible cleanup vault`;
-  const r = await api.confirm({ message: rec.title, detail: verb +
-    '\n\nNothing is permanently deleted — files move into subfolders or a dated vault in ~/.oyster/cleanup you can restore from.',
-    buttons: ['Cancel', rec.kind === 'organize' ? 'Organize' : 'Clean up'] });
-  if (r !== 1) return;
+async function reviewExecute(action) {
+  const r = RV.rec;
+  let paths = [...RV.sel];
+  if (action === 'organize') paths = [];
+  if (action !== 'organize' && !paths.length) { setStatus('Nothing selected.'); return; }
+  // safety: warn if a risky-to-delete file is being removed
+  let warn = '';
+  if (action === 'delete') {
+    const items = r.groups ? r.groups.flatMap((g) => g.copies) : (r.items || []);
+    const risky = items.filter((i) => paths.includes(i.path) && i.risk);
+    if (risky.length) warn = `\n\n⚠ ${risky.length} selected file(s) may belong to a program (${risky[0].risk}). Deleting could break it.`;
+  }
+  const verb = action === 'organize' ? `Organize ${r.count} files into folders`
+    : action === 'important' ? `Move ${paths.length} important file(s) to the Important folder`
+    : action === 'archive' ? `Move ${paths.length} file(s) to the archive folder`
+    : `Move ${paths.length} file(s) to the reversible cleanup vault`;
+  const c = await api.confirm({ message: r.title, detail: verb + warn +
+    '\n\nNothing is permanently deleted — everything moves and can be restored.',
+    buttons: ['Cancel', action === 'organize' ? 'Organize' : action === 'important' ? 'Move' : action === 'archive' ? 'Archive' : 'Delete'] });
+  if (c !== 1) return;
   try {
-    const res = await api.rpc('organize_apply', {
-      action: rec.kind === 'organize' ? 'organize' : rec.kind,
-      paths: rec.extra && rec.extra.paths ? rec.extra.paths : recPaths(rec),
-      folder: S.organize.folder, categories: rec.extra && rec.extra.categories,
+    const res = await api.rpc('organize_execute', {
+      action, paths, folder: S.organize.folder,
+      categories: action === 'organize' ? r.categories : undefined,
     });
-    setStatus(`Done · moved ${res.moved} file(s)` + (res.human ? ` · freed ${res.human}` : '') + (res.errors ? ` · ${res.errors} error(s)` : '') + '.');
+    setStatus(`Done · moved ${res.moved} file(s)` + (res.human ? ` · freed ${res.human}` : '') + (res.errors ? ` · ${res.errors} skipped` : '') + '.');
+    closeReview();
     const re = await api.rpc('organize_scan', { path: S.organizeTarget });
     S.organize = re; if (S.page === 'Cleanup') renderOrganize();
   } catch (e) { setStatus('Cleanup failed: ' + e.message); }
 }
-function recPaths(rec) { return (rec.extra && rec.extra.paths) || []; }
 
 async function runScan(method, params) {
   if (S.busy) return; S.busy = true; startScanUI('Scanning…');
@@ -433,6 +580,18 @@ async function sweep() {
   try { const r = await api.rpc('sweep_processes'); S.data.Processes = r.processes; S.procTotal = r.total; S.sel.Processes = null; S.scanned = true; setStatus(`Swept ${(r.total||0).toLocaleString()} processes · ${r.processes.length} flagged.`); }
   catch (e) { setStatus('Sweep failed: ' + e.message); }
   endScanUI(); S.busy = false; if (S.page === 'Processes') renderScan(); updateNav();
+}
+async function updateDefs() {
+  if (S.busy) return; S.busy = true;
+  const c = await api.confirm({ message: 'Update vulnerability definitions',
+    detail: 'Download the latest OSV CVE snapshot (PyPI + npm). This is the one '
+    + 'time Oyster goes online — it tells you exactly which host it contacts.',
+    buttons: ['Cancel', 'Download'] });
+  if (c !== 1) { S.busy = false; return; }
+  startScanUI('Downloading CVE definitions…');
+  try { const r = await api.rpc('update_defs'); setStatus(`Definitions updated · ${r.rows.toLocaleString()} advisories. Re-run the audit.`); }
+  catch (e) { setStatus('Update failed: ' + e.message); }
+  endScanUI(); S.busy = false;
 }
 async function audit() {
   if (S.busy) return; S.busy = true; startScanUI('Auditing software & OS…');
@@ -487,6 +646,7 @@ function endScanUI() {
 }
 function onProgress(text) {
   setStatus(text);
+  if (setupActive) { $('gate-msg').textContent = text; $('gate-msg').style.color = 'var(--accent)'; }
   const m = /([\d,]+)\s+seen/.exec(text); if (m) scan.count = parseInt(m[1].replace(/,/g, ''), 10);
 }
 function fmtTime(s) { const m = Math.floor(s / 60), ss = Math.floor(s % 60); return m + ':' + String(ss).padStart(2, '0'); }
