@@ -15,18 +15,6 @@ to read those findings, prioritize them, explain them, and suggest what to do. A
 it never does anything destructive on its own. "Delete" really means "move to a
 reversible quarantine," and Oyster always asks before touching anything important.
 
-## Screenshots
-
-<!-- Drop UI screenshots here. Capture from the running app and save under
-     docs/screenshots/. Suggested shots: Files scan, Cleanup review, AI Summary. -->
-
-![Oyster — desktop app](docs/screenshots/oyster.png)
-
-<!--
-![Oyster — Cleanup review](docs/screenshots/cleanup.png)
-![Oyster — AI Summary](docs/screenshots/summary.png)
--->
-
 ## What you get
 
 - **A real desktop app** (Electron, true frosted-glass UI) on macOS and Windows,
