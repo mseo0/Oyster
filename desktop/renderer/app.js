@@ -86,7 +86,8 @@ async function init() {
   });
   // cleanup review modal
   $('rv-close').addEventListener('click', closeReview);
-  document.addEventListener('keydown', rvKeyNav);   // arrow up/down through the list
+  document.addEventListener('keydown', rvKeyNav);   // arrow up/down through the modal list
+  document.addEventListener('keydown', listKeyNav); // arrow up/down through the main list
   $('review').addEventListener('click', (e) => {
     if (e.target === $('review')) return closeReview();           // click backdrop
     const rev = e.target.closest('[data-reveal]'); if (rev) return api.reveal(rev.dataset.reveal);
@@ -201,8 +202,11 @@ function navBtn(n) {
     <span class="lbl">${n.key}</span><span class="nav-badge" data-badge="${n.key}"></span></button>`;
 }
 function updateNav() {
-  document.querySelectorAll('.nav-btn').forEach((b) =>
-    b.classList.toggle('active', b.dataset.page === S.page));
+  document.querySelectorAll('.nav-btn').forEach((b) => {
+    const on = b.dataset.page === S.page;
+    b.classList.toggle('active', on);
+    if (b.dataset.page) b.setAttribute('aria-current', on ? 'page' : 'false');
+  });
   for (const key of ['Files', 'Processes', 'Vulnerabilities']) {
     const el = document.querySelector(`[data-badge="${key}"]`); if (!el) continue;
     const n = S.data[key].filter((o) => !o.resolved && o.severity !== 'info').length;
@@ -244,6 +248,7 @@ function renderScan() {
       </div>
     </div>`;
   renderRows(); renderInspector();
+  setActionsBusy(S.busy);   // keep buttons disabled if a scan is mid-flight
 }
 
 function taskbar() {
@@ -448,6 +453,7 @@ function renderOrganize() {
     <div class="cleanup-body">${body}</div>`;
   const ci = $('chat-in');
   if (ci) ci.addEventListener('keydown', (e) => { if (e.key === 'Enter') chatSend(); });
+  setActionsBusy(S.busy);
 }
 
 // ---------- Applications cleanup ----------
@@ -486,6 +492,7 @@ function renderApplications() {
       <button class="btn primary" data-action="apps-scan">${ic('search', 15)} Scan ${isWin ? 'programs' : 'apps'}</button>
     </div>
     <div class="cleanup-body">${body}</div>`;
+  setActionsBusy(S.busy);
 }
 function humanBytes(n) {
   for (const u of ['B', 'KB', 'MB', 'GB', 'TB']) {
@@ -533,7 +540,7 @@ function openReview(rec) {
   if (rec.kind === 'junk' || rec.kind === 'chat') presafe(rec.items);
   else if (rec.kind === 'important' || rec.kind === 'app') (rec.items || []).forEach((i) => sel.add(i.path));
   else if (rec.kind === 'duplicates') (rec.groups || []).forEach((g) => g.copies.forEach((c) => { if (itemTag(c) === 'remove') sel.add(c.path); }));
-  RV = { rec, sel, tags: new Set(), lastPath: null };
+  RV = { rec, sel, tags: new Set(), lastPath: null, opener: document.activeElement };
   $('rv-title').textContent = rec.title;
   $('rv-sub').textContent = rec.detail || '';
   renderReviewBody();
@@ -541,7 +548,11 @@ function openReview(rec) {
   const first = $('rv-list').querySelector('input[type=checkbox]');
   if (first) first.focus({ preventScroll: true });   // so arrow keys / space work at once
 }
-function closeReview() { $('review').classList.add('hidden'); RV = null; }
+function closeReview() {
+  const opener = RV && RV.opener;   // restore focus to whatever opened the modal
+  $('review').classList.add('hidden'); RV = null;
+  if (opener && opener.focus) { try { opener.focus(); } catch (e) { /* gone */ } }
+}
 
 // per-file suggestion — combines important/risky/empty/type/who-made-it into a
 // single keep / review / remove recommendation (computed by the engine; the
@@ -648,6 +659,7 @@ function updateRvCount() {
 // as you go, Space (native) toggles the focused row.
 function rvKeyNav(e) {
   if (!RV || $('review').classList.contains('hidden')) return;
+  if (e.key === 'Escape') { e.preventDefault(); return closeReview(); }
   if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
   const boxes = [...$('rv-list').querySelectorAll('input[type=checkbox]')];
   if (!boxes.length) return;
@@ -663,6 +675,28 @@ function rvKeyNav(e) {
     b.checked = true; RV.sel.add(b.dataset.path); RV.lastPath = b.dataset.path;
     updateRvCount();
   }
+}
+
+// arrow keys move the selection up/down the main Files/Processes/Vulnerabilities
+// list — mirrors the review modal, so keyboard navigation is consistent.
+function listKeyNav(e) {
+  if (!['Files', 'Processes', 'Vulnerabilities'].includes(S.page)) return;
+  if (!$('review').classList.contains('hidden')) return;       // modal owns the keys
+  const tag = (document.activeElement && document.activeElement.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;            // don't hijack typing
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+  const list = $('list'); if (!list) return;
+  const rows = [...list.querySelectorAll('.row')];
+  if (!rows.length) return;
+  e.preventDefault();
+  const items = S.data[S.page];
+  const selIdx = items.indexOf(S.sel[S.page]);
+  let pos = rows.findIndex((r) => +r.dataset.idx === selIdx);
+  if (pos < 0) pos = e.key === 'ArrowDown' ? 0 : rows.length - 1;
+  else pos = e.key === 'ArrowDown' ? Math.min(pos + 1, rows.length - 1) : Math.max(pos - 1, 0);
+  S.sel[S.page] = items[+rows[pos].dataset.idx];
+  renderRows(); renderInspector();
+  const sel = $('list').querySelector('.row.sel'); if (sel) sel.scrollIntoView({ block: 'nearest' });
 }
 
 // shift-click range select: set every checkbox between two rows to `checked`
@@ -748,16 +782,16 @@ async function askFile() {
 
 async function chatSend() {
   const inp = $('chat-in'); const prompt = inp && inp.value.trim(); if (!prompt) return;
-  if (S.busy) return; S.busy = true; setStatus('Asking Oyster…');
+  if (S.busy) return; S.busy = true; setActionsBusy(true); setStatus('Asking Oyster…');
   try {
     const r = await api.rpc('assistant', { prompt, folder: S.organizeTarget });
     setStatus(`${r.count} file(s) match · ${r.human}.`);
-    if (!r.count) { setStatus(`No files matched “${prompt}”.`); S.busy = false; return; }
+    if (!r.count) { setStatus(`No files matched “${prompt}”.`); S.busy = false; setActionsBusy(false); return; }
     openReview({ kind: 'chat', title: r.summary,
       detail: `${r.count} files (${r.human}) in ${r.folder}. Review and confirm — nothing happens without your OK.`,
       items: r.files, count: r.count, deleteLabel: 'Delete selected' });
   } catch (e) { setStatus('Assistant failed: ' + e.message); }
-  S.busy = false;
+  S.busy = false; setActionsBusy(false);
 }
 
 async function organizeAnalyze() {
@@ -963,19 +997,36 @@ function setMode(mode) {
   if (api.setTheme) api.setTheme(mode);   // flip the native vibrancy material too
 }
 function setStatus(s) { $('status').textContent = s; }
+// while a scan/analyze/sweep is running, disable the action buttons that would
+// start another one (the Stop button lives in the scanbar, so it's untouched).
+function setActionsBusy(busy) {
+  document.querySelectorAll('.taskbar [data-action], .chatbar [data-action]')
+    .forEach((b) => { b.disabled = !!busy; });
+}
 
 // ---------- live scan timer / throughput / ETA ----------
 let scan = { start: 0, count: 0, total: 0, timer: null, active: false, label: '', canceling: false };
 function startScanUI(label) {
   scan = { start: Date.now(), count: 0, total: 0, timer: null, active: true, label, canceling: false };
-  $('scanbar').classList.remove('hidden'); paintScanBar();
+  const bar = $('scanbar');
+  bar.classList.remove('hidden');
+  // Build the bar ONCE. The spinner + track elements then animate continuously
+  // instead of being recreated (and restarted) on every repaint; only the label,
+  // progress width and numbers below are updated in place.
+  bar.innerHTML = `<span class="spin"></span><span class="lbl" id="sb-label"></span>
+    <span class="track" id="sb-track"><i></i><b style="width:0%"></b></span>
+    <span class="nums" id="sb-nums"></span>
+    <button class="btn danger stopbtn" id="sb-stop" data-action="stop">Stop</button>`;
+  paintScanBar();
   scan.timer = setInterval(paintScanBar, 250);
   if (api.setBusy) api.setBusy(true);   // let main warn before quitting mid-scan
+  setActionsBusy(true);
 }
 function endScanUI() {
   scan.active = false; if (scan.timer) clearInterval(scan.timer);
   $('scanbar').classList.add('hidden');
   if (api.setBusy) api.setBusy(false);
+  setActionsBusy(false);
 }
 function onProgress(text) {
   setStatus(text);
@@ -998,15 +1049,26 @@ function paintScanBar() {
     eta = fmtEta((scan.total - scan.count) / rate);
   } else if (scan.total > 0 && scan.count >= scan.total) { eta = 'finishing…'; }
   const pct = scan.total > 0 ? Math.min(100, (scan.count / scan.total) * 100) : null;
-  const stat = (v, l) => `<span class="x"><div class="v">${v}</div><div class="l">${l}</div></span>`;
-  const track = pct === null ? '<span class="track"><i></i></span>'
-    : `<span class="track det"><b style="width:${pct.toFixed(1)}%"></b></span>`;
-  const stopBtn = scan.canceling
-    ? `<button class="btn ghost stopbtn" data-action="stop" disabled style="opacity:.6">Stopping…</button>`
-    : `<button class="btn danger stopbtn" data-action="stop">Stop</button>`;
-  $('scanbar').innerHTML = `<span class="spin"></span><span class="lbl">${scan.canceling ? 'Cancelling…' : scan.label}</span>${track}
-    <span class="nums">${stat(scan.count.toLocaleString(), 'files')}${stat(fmtTime(sec), 'elapsed')}${stat(eta, 'remaining')}${stat(Math.round(rate).toLocaleString(), '/sec')}</span>
-    ${stopBtn}`;
+  // update only the dynamic bits — the spinner element is left alone so it keeps
+  // spinning smoothly until the scan ends.
+  const lbl = $('sb-label'); if (lbl) lbl.textContent = scan.canceling ? 'Cancelling…' : scan.label;
+  const track = $('sb-track');
+  if (track) {
+    track.classList.toggle('det', pct !== null);
+    if (pct !== null) { const b = track.querySelector('b'); if (b) b.style.width = pct.toFixed(1) + '%'; }
+  }
+  const nums = $('sb-nums');
+  if (nums) {
+    const stat = (v, l) => `<span class="x"><div class="v">${v}</div><div class="l">${l}</div></span>`;
+    nums.innerHTML = `${stat(scan.count.toLocaleString(), 'files')}${stat(fmtTime(sec), 'elapsed')}${stat(eta, 'remaining')}${stat(Math.round(rate).toLocaleString(), '/sec')}`;
+  }
+  const stop = $('sb-stop');
+  if (stop) {
+    stop.textContent = scan.canceling ? 'Stopping…' : 'Stop';
+    stop.disabled = !!scan.canceling;
+    stop.classList.toggle('danger', !scan.canceling);
+    stop.classList.toggle('ghost', !!scan.canceling);
+  }
 }
 
 init();
