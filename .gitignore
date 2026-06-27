@@ -12,10 +12,22 @@ __pycache__/
 # Electron app
 desktop/node_modules/
 desktop/dist/
+desktop/out/
 *.dmg
+*.app
 
-# Oyster local data
+# logs
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# env / secrets
+.env
+.env.*
+
+# Oyster local data + downloaded definitions
 .oyster/
+*.icns.tmp
 
 # Icon build intermediate (the .icns/.ico/.png outputs are kept)
 branding/Oyster.iconset/
@@ -25,3 +37,7 @@ branding/Oyster.iconset/
 *.swp
 .idea/
 .vscode/
+
+# Bundled ClamAV is assembled in CI (binaries + DB), not committed
+desktop/resources/clamav/*
+!desktop/resources/clamav/.gitkeep

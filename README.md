@@ -15,6 +15,35 @@ to read those findings, prioritize them, explain them, and suggest what to do. A
 it never does anything destructive on its own. "Delete" really means "move to a
 reversible quarantine," and Oyster always asks before touching anything important.
 
+## Screenshots
+
+<!-- Drop UI screenshots here. Capture from the running app and save under
+     docs/screenshots/. Suggested shots: Files scan, Cleanup review, AI Summary. -->
+
+![Oyster — desktop app](docs/screenshots/oyster.png)
+
+<!--
+![Oyster — Cleanup review](docs/screenshots/cleanup.png)
+![Oyster — AI Summary](docs/screenshots/summary.png)
+-->
+
+## What you get
+
+- **A real desktop app** (Electron, true frosted-glass UI) on macOS and Windows,
+  driving the Python scanning engine as a local sidecar — no sockets, no egress.
+- **Files** — on-demand scan with ClamAV + YARA + known-bad hashes, reversible
+  quarantine, and a "downloaded only" filter so it ignores files you made yourself.
+- **Processes** — running programs scored by suspicious behaviour (masquerading,
+  temp-dir binaries, unsigned + network).
+- **Vulnerabilities** — your installed packages matched against an offline OSV/CVE
+  snapshot, plus OS posture (Firewall, SIP, FileVault, Gatekeeper).
+- **Cleanup** — find junk, duplicates, large & stale files; the AI flags
+  *personally important* files (tax, legal, identity, credentials) and keeps them
+  out of every delete suggestion, and warns before removing anything that looks
+  like it belongs to a program. A **chat box** takes plain-English commands
+  ("remove all files with ENGE in the name"). Everything is reversible.
+- **AI Summary** — a plain-English read-out written locally by Ollama, after a scan.
+
 ## Why you can trust that it stays offline
 
 This isn't a promise in a privacy policy — it's how the code is shaped:
@@ -70,6 +99,30 @@ Here's where each piece lives if you want to poke around:
 | Engine sidecar | [sidecar/server.py](sidecar/server.py) | wraps core/ as stdio JSON-RPC for the app |
 | Desktop app | [desktop/](desktop/) | Electron UI (real frosted glass) driving the Python engine |
 | Cleanup/organize | [core/organize.py](core/organize.py) | finds junk/dupes/clutter, recommends tidy-up |
+
+## Download & install
+
+Grab the latest installer from the [**Releases**](../../releases) page:
+
+| Platform | File | Install |
+|----------|------|---------|
+| macOS | `Oyster-x.y.z-arm64.dmg` | Open the `.dmg`, drag **Oyster** into **Applications**. |
+| Windows | `Oyster-Setup-x.y.z.exe` | Run the installer (per-user, no admin needed). |
+
+**First launch — getting past the "unverified app" warning.** Oyster is signed
+ad-hoc (it doesn't have a paid Apple/Microsoft signing certificate), so the OS
+shows a one-time warning. It's safe to allow:
+
+- **macOS:** right-click the app → **Open** → **Open** (or System Settings →
+  Privacy & Security → **Open Anyway**). Only needed once.
+- **Windows:** if SmartScreen pops up, click **More info → Run anyway**.
+
+On first launch Oyster offers to **set up its scanning definitions** (downloads
+the ClamAV signature database and, optionally, a small local AI model). That's
+the only time it goes online, and it tells you exactly what it contacts.
+
+> Building it yourself / contributing? See the developer setup below and
+> [desktop/README.md](desktop/README.md).
 
 ## Getting set up
 
@@ -141,3 +194,8 @@ is a different kind of project — and it's not trying to replace Defender or
 XProtect. Think of it as an on-demand scanner with a smart assistant reading over
 the results: something you run when you want a thorough look, not something humming
 in the background all day.
+
+## License
+
+[MIT](LICENSE) © 2026 Matthew Seo. Provided as-is, with no warranty — see the
+license for details.
