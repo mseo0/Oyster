@@ -18,12 +18,16 @@ from pathlib import Path
 if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import contextlib  # noqa: E402
+import re  # noqa: E402
+
 from core import (config, organize, posture, preflight, processes,  # noqa: E402
                   provenance, toolpaths, vulnaudit)
 from core.findings import FindingKind, Store  # noqa: E402
 from core.quarantine import Quarantine  # noqa: E402
 from core.scanner import Scanner, count_candidates  # noqa: E402
 from agent import triage  # noqa: E402
+from agent.ollama_client import Ollama  # noqa: E402
 
 FILE_KINDS = (FindingKind.FILE_MALWARE, FindingKind.FILE_SUSPICIOUS)
 _OUT_LOCK = threading.Lock()
@@ -144,15 +148,59 @@ def _sev_rank(s: str) -> int:
     return {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}.get(s, 5)
 
 
+def _fallback_parse(prompt: str) -> dict:
+    """Parse a cleanup command without the LLM (keyword heuristics)."""
+    low = prompt.lower()
+    action = "archive" if ("archive" in low or "move" in low) else "delete"
+    contains = re.findall(r'["“”\']([^"“”\']+)["“”\']', prompt)
+    contains += [t for t in re.findall(r"\b[A-Z]{2,}[A-Z0-9]*\b", prompt)
+                 if t.lower() not in ("pdf", "jpg", "png", "mb", "gb", "os", "ai")]
+    contains += [w for w in re.findall(
+        r"\b(?:of|with|named|containing|called|about|for)\s+([A-Za-z0-9_\-]{2,})", low)
+        if w not in ("class", "files", "file", "all", "the", "this", "that")]
+    contains = list(dict.fromkeys(contains))
+    ext = ["." + e for e in re.findall(r"\.([a-z0-9]{1,5})\b", low)]
+    for word, e in (("pdf", ".pdf"), ("zip", ".zip"), ("screenshot", ".png")):
+        if word in low and e not in ext:
+            ext.append(e)
+    older = None
+    m = re.search(r"(?:older than|not opened in|untouched for|over)\s+(\d+)\s*"
+                  r"(day|week|month|year)", low)
+    if m:
+        older = int(m.group(1)) * {"day": 1, "week": 7, "month": 30, "year": 365}[m.group(2)]
+    larger = None
+    m = re.search(r"(?:larger than|bigger than|over)\s+(\d+)\s*(mb|gb)", low)
+    if m:
+        larger = int(m.group(1)) * (1024 if m.group(2) == "gb" else 1)
+    label = ", ".join(contains) or ", ".join(ext) or prompt
+    return {"summary": f"Files matching: {label}", "contains": contains,
+            "ext": ext, "olderDays": older, "largerMb": larger, "action": action}
+
+
 class Engine:
     def __init__(self):
         toolpaths.ensure_path()
         self.cfg = config.ScanConfig()
-        self.model = config.recommended_model()
+        self.model = self._pick_model()
         self.store = Store(self.cfg.db_path)
         self.quar = Quarantine(self.cfg.quarantine_dir)
         self._cancel = threading.Event()
         self.scanned_once = False
+
+    def _pick_model(self) -> str:
+        """Use an already-installed model if there is one (so we don't ask for a
+        model the user hasn't pulled), else the RAM-recommended one."""
+        rec = config.recommended_model()
+        try:
+            installed = Ollama(rec).installed()
+        except Exception:
+            installed = []
+        if rec in installed:
+            return rec
+        for m in ("llama3.2:3b", "qwen3:1.7b", "qwen3:4b", "qwen3:8b"):
+            if m in installed:
+                return m
+        return installed[0] if installed else rec
 
     # --- meta ---------------------------------------------------------
     def hello(self, _):
@@ -260,14 +308,126 @@ class Engine:
             self.store.session_summary_data(), self.model),
             "ready": self.scanned_once}
 
+    # --- local LLM helpers -------------------------------------------
+    def _llm_json(self, system: str, prompt: str) -> dict | None:
+        """Ask the local model for a JSON object; None if unavailable/failed."""
+        try:
+            client = Ollama(self.model)
+            if not client.available():
+                return None
+            txt = client.generate(prompt=prompt, system=system, fmt_json=True)
+            m = re.search(r"\{.*\}", txt, re.S)
+            return json.loads(m.group(0)) if m else None
+        except Exception:
+            return None
+
+    def _classify_important(self, names: list[str]) -> set:
+        if not names:
+            return set()
+        obj = self._llm_json(
+            "You output only JSON {\"important\": [filenames]}.",
+            "From these filenames, list ONLY the ones that look like personally "
+            "important documents a person would never want deleted (taxes, "
+            "legal, identity, financial, medical, credentials, irreplaceable). "
+            "Filenames:\n" + "\n".join(names))
+        return set(obj.get("important", [])) if obj else set()
+
     # --- organize / cleanup ------------------------------------------
     def organize_scan(self, params):
         path = params.get("path") or str(Path.home() / "Downloads")
-        return organize.analyze(path, progress=lambda s: _emit("progress", s))
+        return organize.analyze(path, progress=lambda s: _emit("progress", s),
+                                classify_important=self._classify_important)
 
-    def organize_apply(self, params):
-        return organize.apply(params["action"], params.get("paths") or [],
-                              params["folder"], params.get("categories"))
+    def organize_execute(self, params):
+        return organize.execute(params["action"], params.get("paths") or [],
+                                params.get("folder", ""),
+                                params.get("categories"))
+
+    # --- natural-language assistant (chat box) -----------------------
+    def assistant(self, params):
+        prompt = (params.get("prompt") or "").strip()
+        folder = params.get("folder") or str(Path.home() / "Downloads")
+        cmd = self._parse_command(prompt)
+        files = organize.find_matching(
+            folder, cmd.get("contains"), cmd.get("ext"),
+            cmd.get("olderDays"), cmd.get("largerMb"))
+        return {"summary": cmd.get("summary") or f"Files matching “{prompt}”",
+                "action": cmd.get("action", "delete"), "files": files,
+                "count": len(files), "folder": folder,
+                "human": organize._human(sum(f["size"] for f in files))}
+
+    def _parse_command(self, prompt: str) -> dict:
+        obj = self._llm_json(
+            "Convert a file-cleanup request into JSON with keys: summary "
+            "(short plain-English description of what will be selected), "
+            "contains (array of case-insensitive substrings to match in the "
+            "filename), ext (array of file extensions like \".pdf\"), olderDays "
+            "(integer or null), largerMb (integer or null), action (one of "
+            "\"delete\",\"archive\"). Output ONLY the JSON object.",
+            f"Request: {prompt}")
+        if obj and isinstance(obj.get("contains", []), list):
+            return obj
+        return _fallback_parse(prompt)   # heuristic when Ollama is off
+
+    # --- definitions updater (the one sanctioned online step) --------
+    def update_defs(self, _):
+        from updater import update as upd
+        _emit("progress", "Downloading OSV CVE snapshot (PyPI, npm)…")
+        # the updater prints to stdout; redirect so it can't corrupt JSON-RPC
+        with contextlib.redirect_stdout(sys.stderr):
+            upd.update_osv(["PyPI", "npm"], self.cfg)
+        from core.osvdb import OsvDB
+        return {"ok": True, "rows": OsvDB(self.cfg.osv_db_path).count}
+
+    # --- first-run setup: fetch the data the app needs --------------
+    def setup_status(self, _):
+        from core.osvdb import OsvDB
+        client = Ollama(self.model)
+        ok = client.available()
+        return {"clamav": bool(toolpaths.find_tool("clamscan")),
+                "cve": OsvDB(self.cfg.osv_db_path).count,
+                "ollama": ok, "model": self.model,
+                "modelReady": (self.model in client.installed()) if ok else False}
+
+    def setup_run(self, _):
+        import subprocess
+        from core.osvdb import OsvDB
+        res = {}
+        # 1) ClamAV signature database (needs ClamAV installed)
+        fc = toolpaths.find_tool("freshclam")
+        if toolpaths.find_tool("clamscan") and fc:
+            _emit("progress", "Updating ClamAV virus database…")
+            try:
+                r = subprocess.run([fc], capture_output=True, text=True,
+                                   timeout=900)
+                res["clamav"] = "ok" if r.returncode == 0 else "skipped"
+            except Exception as e:
+                res["clamav"] = f"error: {e}"
+        else:
+            res["clamav"] = "clamav not installed"
+        # 2) OSV CVE snapshot (only if not present)
+        try:
+            if OsvDB(self.cfg.osv_db_path).count == 0:
+                from updater import update as upd
+                _emit("progress", "Downloading OSV CVE snapshot…")
+                with contextlib.redirect_stdout(sys.stderr):
+                    upd.update_osv(["PyPI", "npm"], self.cfg)
+            res["cve"] = OsvDB(self.cfg.osv_db_path).count
+        except Exception as e:
+            res["cve"] = f"error: {e}"
+        # 3) local AI model (only if Ollama is running and it's missing)
+        rec = config.recommended_model()
+        client = Ollama(rec)
+        if client.available():
+            if rec not in client.installed():
+                _emit("progress", f"Downloading local AI model {rec} "
+                      "(one-time; a few minutes)…")
+                client.pull(rec)
+            self.model = self._pick_model()
+            res["model"] = self.model
+        else:
+            res["model"] = "ollama not running"
+        return res
 
 
 def _handle(engine: Engine, req: dict) -> None:

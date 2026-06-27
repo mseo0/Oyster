@@ -13,13 +13,15 @@ from pathlib import Path
 # --- LLM tiering (the model is loaded ON DEMAND during triage, never during ---
 # --- the scan, so it never competes with the disk walk for RAM). ------------
 def recommended_model() -> str:
-    """Pick an Ollama model from available RAM. 8GB floor -> a 3B model."""
+    """Pick an Ollama model by RAM. Oyster's AI jobs (summarize, classify, parse)
+    are easy, so we default to small/fast models — a ~2 GB 3B model is plenty and
+    keeps the first-run download light. Big machines may use a larger one."""
     gb = _total_ram_gb()
-    if gb >= 30:
-        return "qwen3:14b"
-    if gb >= 15:
-        return "qwen3:8b"
-    return "llama3.2:3b"  # 8GB everyday machine (the target floor)
+    if gb >= 32:
+        return "qwen3:8b"      # ~5 GB — only where there's RAM to spare
+    if gb >= 12:
+        return "llama3.2:3b"   # ~2 GB — the efficient default for most machines
+    return "qwen3:1.7b"        # ~1.4 GB — smallest, for tight RAM
 
 
 def _total_ram_gb() -> float:

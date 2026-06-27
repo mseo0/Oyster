@@ -10,7 +10,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .toolpaths import find_tool
+from .toolpaths import bundled_clamav, find_tool
 
 
 @dataclass
@@ -23,9 +23,17 @@ class EngineResult:
 
 class ClamEngine:
     def __init__(self, extra_yara_dir: Path | None = None):
-        # find_tool (not shutil.which) so the bundled .app, which launches with
-        # a minimal PATH, still locates Homebrew's clamscan.
-        self.clamscan = find_tool("clamscan")
+        # Prefer a clamscan bundled with the app (Windows ships its own); else
+        # find one on the system (find_tool, not shutil.which, so the minimal-PATH
+        # .app still locates Homebrew's).
+        self.bundled_db: str | None = None
+        b = bundled_clamav()
+        if b:
+            self.clamscan = str(b)
+            db = b.parent / "db"
+            self.bundled_db = str(db) if db.is_dir() else None
+        else:
+            self.clamscan = find_tool("clamscan")
         self.extra_yara_dir = extra_yara_dir
 
     @property
@@ -43,6 +51,8 @@ class ClamEngine:
             return EngineResult(available=False, infected=False,
                                 detail="engine unavailable")
         cmd = [self.clamscan, "--no-summary", "--stdout"]
+        if self.bundled_db:        # point bundled clamscan at its bundled DB
+            cmd += ["--database", self.bundled_db]
         if self.extra_yara_dir and self.extra_yara_dir.exists():
             cmd += ["-d", str(self.extra_yara_dir)]
         cmd.append(str(path))

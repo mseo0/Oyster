@@ -45,3 +45,25 @@ class Ollama:
         )
         with urllib.request.urlopen(req, timeout=120) as r:
             return json.loads(r.read())["response"]
+
+    def installed(self) -> list[str]:
+        """Names of models already pulled locally (e.g. ['llama3.2:3b'])."""
+        try:
+            req = urllib.request.Request(
+                netguard.assert_loopback(f"{self.base_url}/api/tags"))
+            with urllib.request.urlopen(req, timeout=3) as r:
+                return [m["name"] for m in json.loads(r.read()).get("models", [])]
+        except Exception:
+            return []
+
+    def pull(self, model: str, timeout: int = 1800) -> bool:
+        """Download a model (blocks until done). Returns True on success."""
+        data = json.dumps({"name": model, "stream": False}).encode()
+        req = urllib.request.Request(
+            netguard.assert_loopback(f"{self.base_url}/api/pull"),
+            data=data, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read()).get("status") == "success"
+        except Exception:
+            return False

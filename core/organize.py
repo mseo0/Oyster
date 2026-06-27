@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,68 @@ _LARGE_BYTES = 100 * 1024 * 1024
 _STALE_DAYS = 180
 _BUF = 1024 * 1024
 _CAP = 500   # max items returned per recommendation
+
+# Filename signals that a file is personally important — never suggest deleting
+# these, and offer to set them aside in a dedicated folder.
+_IMPORTANT_KW = {
+    "tax": "tax document", "taxes": "tax document", "w2": "tax form",
+    "w-2": "tax form", "1099": "tax form", "irs": "tax document",
+    "invoice": "invoice", "receipt": "receipt", "statement": "financial statement",
+    "bank": "bank record", "paystub": "pay record", "payslip": "pay record",
+    "payroll": "pay record", "salary": "pay record", "401k": "retirement record",
+    "ira": "retirement record", "pension": "retirement record",
+    "contract": "legal contract", "agreement": "legal agreement",
+    "lease": "lease", "mortgage": "mortgage", "deed": "property deed",
+    "will": "legal document", "trust": "legal document",
+    "passport": "identity document", "license": "identity document",
+    "licence": "identity document", "ssn": "identity document",
+    "birth": "identity document", "certificate": "certificate",
+    "diploma": "diploma", "transcript": "transcript", "visa": "immigration doc",
+    "insurance": "insurance", "policy": "insurance/policy",
+    "medical": "medical record", "health": "health record",
+    "prescription": "medical record", "resume": "resume", "cv": "resume",
+    "password": "credentials", "passwords": "credentials",
+    "recovery": "recovery/backup key", "seed": "recovery/backup key",
+    "keychain": "credentials", "wallet": "crypto wallet",
+    "credentials": "credentials", "backup": "backup",
+    "warranty": "warranty", "registration": "registration",
+}
+
+
+def important_reason(name: str) -> str:
+    tokens = set(re.split(r"[^a-z0-9]+", name.lower()))
+    for kw, reason in _IMPORTANT_KW.items():
+        if kw in tokens:                 # exact token (handles short kws: w2, id)
+            return reason
+        if len(kw) >= 4 and any(kw in t for t in tokens):   # substring for long
+            return reason
+    return ""
+
+
+# Paths/types where deleting could break a program or the OS — flag, don't hide.
+_RISK_DIR = (".app/", "/applications/", "/system/", "/library/", "/usr/",
+             "/bin/", "/sbin/", "/opt/", "/private/var/", "/frameworks/",
+             "application support", "/node_modules/", "/site-packages/",
+             "/.git/", "/vendor/", "/__pycache__/", "/.venv/")
+_RISK_EXT = {".dylib", ".so", ".framework", ".kext", ".app", ".exe", ".dll",
+             ".sys", ".o", ".a", ".lib", ".bundle", ".plist", ".entitlements"}
+_CONFIG_EXT = {".plist", ".cfg", ".ini", ".conf", ".config", ".lock", ".db"}
+
+
+def delete_risk(path: str) -> str:
+    """Why removing this file might break something — '' if it's safe to remove."""
+    low = path.lower()
+    name = Path(path).name
+    for d in _RISK_DIR:
+        if d in low:
+            return "lives inside an app / system / dependency folder"
+    ext = Path(path).suffix.lower()
+    if ext in _RISK_EXT:
+        return "a program or library file an app may load"
+    if ext in _CONFIG_EXT or (name.startswith(".") and ext not in
+                              (".jpg", ".png", ".pdf", ".txt")):
+        return "looks like a config a program may rely on"
+    return ""
 
 
 def _human(n: float) -> str:
@@ -53,10 +116,13 @@ def _info(p: Path, st=None) -> dict:
         return {"path": str(p), "name": p.name, "size": st.st_size,
                 "human": _human(st.st_size),
                 "modified": _date(st.st_mtime), "accessed": _date(st.st_atime),
-                "atime": st.st_atime}
+                "atime": st.st_atime,
+                "important": important_reason(p.name),
+                "risk": delete_risk(str(p))}
     except OSError:
         return {"path": str(p), "name": p.name, "size": 0, "human": "0 B",
-                "modified": "", "accessed": "", "atime": 0}
+                "modified": "", "accessed": "", "atime": 0,
+                "important": "", "risk": ""}
 
 
 def _date(ts: float) -> str:
@@ -79,18 +145,17 @@ class Rec:
     categories: dict = field(default_factory=dict)
 
 
-def analyze(folder: str, progress=lambda s: None) -> dict:
+def analyze(folder: str, progress=lambda s: None,
+            classify_important=None) -> dict:
     root = Path(folder).expanduser()
-    by_cat: dict[str, list] = {}
-    junk, large, stale = [], [], []
+    all_infos: list[dict] = []
     by_size: dict[int, list[Path]] = {}
     now = time.time()
     total_files = total_bytes = 0
 
     for dirpath, dirnames, filenames in os.walk(root):
-        # don't descend into our own archive/vault output
         dirnames[:] = [d for d in dirnames if d not in
-                       ("Oyster Archive", ".oyster")]
+                       ("Oyster Archive", "Important", ".oyster")]
         if len(Path(dirpath).relative_to(root).parts) >= 5:
             dirnames[:] = []
         for fn in filenames:
@@ -101,21 +166,54 @@ def analyze(folder: str, progress=lambda s: None) -> dict:
                 continue
             total_files += 1
             total_bytes += st.st_size
-            info = _info(p, st)
-            cat = _category(p)
-            if cat != "Other":
-                by_cat.setdefault(cat, []).append(info)
-            if fn.lower() in _JUNK_NAMES or p.suffix.lower() in _JUNK_EXTS:
-                junk.append(info)
-            if st.st_size >= _LARGE_BYTES:
-                large.append(info)
-            if (now - st.st_atime) > _STALE_DAYS * 86400 and st.st_size > 1024:
-                stale.append(info)
+            all_infos.append(_info(p, st))
             by_size.setdefault(st.st_size, []).append(p)
             if total_files % 500 == 0:
                 progress(f"Analyzing · {total_files:,} files")
 
+    # AI pass: let the model flag important-looking files the keywords missed
+    # (only the ones at risk of cleanup, and only when a classifier is given).
+    if classify_important:
+        cand = [i for i in all_infos if not i["important"] and
+                (i["size"] >= _LARGE_BYTES or
+                 (now - i["atime"]) > _STALE_DAYS * 86400)]
+        try:
+            flagged = classify_important([i["name"] for i in cand][:120]) or set()
+            for i in cand:
+                if i["name"] in flagged:
+                    i["important"] = "AI: looks personally important"
+        except Exception:
+            pass
+
+    important = [i for i in all_infos if i["important"]]
+    imp = {i["path"] for i in important}
+
+    by_cat: dict[str, list] = {}
+    junk, large, stale = [], [], []
+    for i in all_infos:
+        if i["path"] in imp:
+            continue   # never put important files up for cleanup
+        p = Path(i["path"])
+        cat = _category(p)
+        if cat != "Other":
+            by_cat.setdefault(cat, []).append(i)
+        if p.name.lower() in _JUNK_NAMES or p.suffix.lower() in _JUNK_EXTS:
+            junk.append(i)
+        if i["size"] >= _LARGE_BYTES:
+            large.append(i)
+        if (now - i["atime"]) > _STALE_DAYS * 86400 and i["size"] > 1024:
+            stale.append(i)
+
     recs: list[Rec] = []
+
+    if important:
+        recs.append(Rec(
+            "important", "Important files — set these aside",
+            f"{len(important)} files look personally important (tax, legal, "
+            "identity, financial, credentials). They're kept out of every "
+            "cleanup suggestion — move them to a dedicated Important folder.",
+            "important", bytes=sum(i["size"] for i in important),
+            count=len(important), items=important[:_CAP]))
 
     cats = {c: items for c, items in by_cat.items() if len(items) >= 3}
     if cats:
@@ -134,7 +232,7 @@ def analyze(folder: str, progress=lambda s: None) -> dict:
                         bytes=sum(i["size"] for i in junk), count=len(junk),
                         items=junk[:_CAP]))
 
-    groups = _dup_groups(by_size, progress)
+    groups = _dup_groups(by_size, progress, imp)
     if groups:
         dup_bytes = sum(g["size"] * len(g["copies"]) for g in groups)
         recs.append(Rec("duplicates", "Review duplicate files",
@@ -183,9 +281,11 @@ def _hash(p: Path) -> str:
     return h.hexdigest()
 
 
-def _dup_groups(by_size: dict, progress) -> list:
+def _dup_groups(by_size: dict, progress, imp: set | None = None) -> list:
+    imp = imp or set()
     groups = []
     for size, paths in by_size.items():
+        paths = [p for p in paths if str(p) not in imp]
         if len(paths) < 2 or size < 4096:
             continue
         seen: dict[str, list] = {}
@@ -222,9 +322,46 @@ def _unique(dest: Path) -> Path:
         i += 1
 
 
+def find_matching(folder: str, contains: list[str] | None = None,
+                  ext: list[str] | None = None, older_days: int | None = None,
+                  larger_mb: int | None = None, cap: int = 1000) -> list[dict]:
+    """Resolve a natural-language file query (from the chat) into file infos."""
+    root = Path(folder).expanduser()
+    contains = [c.lower() for c in (contains or []) if c]
+    exts = {e.lower() if e.startswith(".") else "." + e.lower()
+            for e in (ext or [])}
+    now = time.time()
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in
+                       ("Oyster Archive", "Important", ".oyster")]
+        for fn in filenames:
+            p = Path(dirpath) / fn
+            low = fn.lower()
+            if contains and not any(c in low for c in contains):
+                continue
+            if exts and p.suffix.lower() not in exts:
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            if older_days and (now - st.st_atime) < older_days * 86400:
+                continue
+            if larger_mb and st.st_size < larger_mb * 1024 * 1024:
+                continue
+            out.append(_info(p, st))
+            if len(out) >= cap:
+                return out
+    return out
+
+
+_DEST = {"archive": "Oyster Archive", "important": "Important"}
+
+
 def execute(action: str, paths: list[str], folder: str = "",
             categories: dict | None = None) -> dict:
-    """action: 'delete' (-> vault), 'archive' (-> <folder>/Oyster Archive),
+    """action: 'delete' (-> vault), 'archive'/'important' (-> a named folder),
     'organize' (-> <folder>/<category>). All moves, never hard deletes."""
     moved = freed = errors = 0
 
@@ -243,8 +380,8 @@ def execute(action: str, paths: list[str], folder: str = "",
                     errors += 1
         return {"moved": moved, "errors": errors, "freed": 0, "human": ""}
 
-    if action == "archive":
-        dest_dir = Path(folder).expanduser() / "Oyster Archive"
+    if action in _DEST:
+        dest_dir = Path(folder).expanduser() / _DEST[action]
         dest_dir.mkdir(parents=True, exist_ok=True)
     else:  # delete -> reversible vault
         dest_dir = _vault()
