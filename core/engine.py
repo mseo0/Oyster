@@ -10,7 +10,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .toolpaths import bundled_clamav, find_tool
+from .toolpaths import bundled_clamav, find_clamav_db, find_tool
 
 
 @dataclass
@@ -34,6 +34,7 @@ class ClamEngine:
             self.bundled_db = str(db) if db.is_dir() else None
         else:
             self.clamscan = find_tool("clamscan")
+            self.bundled_db = find_clamav_db()
         self.extra_yara_dir = extra_yara_dir
 
     @property

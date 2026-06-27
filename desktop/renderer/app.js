@@ -2,6 +2,10 @@
 // Oyster renderer — talks to the Python engine via window.oyster (preload).
 
 const api = window.oyster;
+
+// Apply platform class immediately (synchronous, no async needed) so CSS
+// Windows overrides are active before the first paint.
+if (api.platform === 'win32') document.documentElement.classList.add('platform-win32');
 const SEV = { critical: '#E5484D', high: '#F5820A', medium: '#E5B003', low: '#17A98C', info: '#8E938A' };
 const sevLabel = (s) => ({ critical: 'CRIT', high: 'HIGH', medium: 'MED', low: 'LOW', info: 'INFO' }[s] || s.toUpperCase());
 const procColor = (n) => n >= 70 ? SEV.critical : n >= 40 ? SEV.high : n >= 20 ? SEV.medium : SEV.info;
@@ -47,6 +51,14 @@ async function init() {
   $('gate-recheck').addEventListener('click', refreshGate);
   $('gate-launch').addEventListener('click', launch);
   $('gate-setup').addEventListener('click', runSetup);
+  $('full-scan-btn').addEventListener('click', deepScan);
+
+  // Windows custom title bar controls
+  if (api.platform === 'win32') {
+    $('win-min').addEventListener('click', () => api.winAction('minimize'));
+    $('win-max').addEventListener('click', () => api.winAction('maximize'));
+    $('win-close').addEventListener('click', () => api.winAction('close'));
+  }
   document.querySelectorAll('.seg-btn').forEach((b) =>
     b.addEventListener('click', () => setMode(b.dataset.mode)));
   document.querySelector('.sidebar').addEventListener('click', (e) => {
@@ -59,7 +71,12 @@ async function init() {
   });
   // stop button lives in the live scan bar
   $('scanbar').addEventListener('click', (e) => {
-    if (e.target.closest('[data-action="stop"]')) { api.rpc('cancel'); setStatus('Stopping…'); }
+    if (e.target.closest('[data-action="stop"]') && !scan.canceling) {
+      scan.canceling = true;
+      api.rpc('cancel');
+      setStatus('Stopping…');
+      paintScanBar(); // immediately reflect the canceling state
+    }
   });
   // cleanup review modal
   $('rv-close').addEventListener('click', closeReview);
@@ -426,7 +443,7 @@ function renderReviewBody() {
     tools.innerHTML = `<button class="btn ghost rv-mini" data-rvall="1">Select all copies</button><button class="btn ghost rv-mini" data-rvall="0">None</button><span class="rv-count" id="rv-n"></span>`;
     list.innerHTML = r.groups.map((g) => `
       <div class="rv-cat"><div class="rv-cat-h">${ic('folder', 14)} ${g.human} each · ${g.copies.length + 1} identical</div>
-        <div class="rv-row keep"><span class="rv-name">${esc(g.keep.name)}</span><span class="rv-meta">KEEP · oldest</span><span class="rv-dir">${esc(g.keep.path)}</span><button class="rv-reveal" data-reveal="${esc(g.keep.path)}">${ic('search', 14)}</button></div>
+        <div class="rv-row keep"><span class="rv-name">${esc(g.keep.name)}</span><span class="rv-meta">KEEP · newest</span><span class="rv-dir">${esc(g.keep.path)}</span><button class="rv-reveal" data-reveal="${esc(g.keep.path)}">${ic('search', 14)}</button></div>
         ${g.copies.map((c) => fileRow(c)).join('')}</div>`).join('');
     foot.innerHTML = footActions('Delete selected copies', false);
   } else if (r.kind === 'important') {
@@ -472,7 +489,7 @@ async function renderSummary() {
       <div class="sub3">Generated locally by <span class="mono" style="color:var(--accent)">${esc(S.model)}</span> · nothing was uploaded.</div></div></div>
     <div class="prose panel" id="prose">Generating local summary…</div>
     <div class="note"><span style="color:var(--accent);display:flex">${ic('shield', 18)}</span>
-      <div><div class="h">This ran entirely on your Mac.</div>
+      <div><div class="h">This ran entirely on your device.</div>
       <div class="x">No uploads, no account, no telemetry. The scanner never opened a network socket.</div></div></div>
   </div></div>`;
   try { const r = await api.rpc('summary'); $('prose').textContent = r.text; }
@@ -570,10 +587,53 @@ async function runScan(method, params) {
 }
 async function deepScan() {
   const r = await api.confirm({
-    message: 'Deep scan — entire computer', type: 'warning', buttons: ['Cancel', 'Scan everything'],
-    detail: 'Scan the entire filesystem, including system, hidden and cache folders. This can take a long time. macOS: grant Full Disk Access or private folders are skipped.',
+    message: 'Full scan — entire computer', type: 'warning', buttons: ['Cancel', 'Scan everything'],
+    detail: 'Runs a deep file scan, process sweep, vulnerability audit, and cleanup analysis back to back. This can take a while.',
   });
-  if (r === 1) runScan('deep_scan', {});
+  if (r !== 1) return;
+  if (S.busy) return;
+  S.busy = true;
+  showPage('Files');
+
+  // ── 1. Deep file scan ──────────────────────────────────────────────────────
+  startScanUI('Full scan — files…');
+  try {
+    const r = await api.rpc('deep_scan', {});
+    S.report = r; S.data.Files = r.findings; S.sel.Files = null; S.scanned = true;
+    setStatus(`Files: ${r.findings.length} finding(s) in ${r.secs}s.`);
+  } catch (e) { setStatus('File scan error: ' + e.message); }
+  if (scan.canceling) { endScanUI(); S.busy = false; updateNav(); renderScan(); return; }
+
+  // ── 2. Process sweep ───────────────────────────────────────────────────────
+  scan.label = 'Full scan — processes…'; paintScanBar();
+  try {
+    const r = await api.rpc('sweep_processes', {});
+    S.data.Processes = r.processes; S.procTotal = r.total; S.sel.Processes = null;
+    setStatus(`Processes: ${r.processes.length} flagged of ${(r.total || 0).toLocaleString()}.`);
+  } catch (e) { setStatus('Process sweep error: ' + e.message); }
+  if (scan.canceling) { endScanUI(); S.busy = false; updateNav(); renderScan(); return; }
+
+  // ── 3. Vulnerability audit ─────────────────────────────────────────────────
+  scan.label = 'Full scan — vulnerabilities…'; paintScanBar();
+  try {
+    const r = await api.rpc('audit_vulns', {});
+    S.data.Vulnerabilities = r.vulns; S.sel.Vulnerabilities = null;
+    setStatus(`Vulnerabilities: ${r.vulns.length} issue(s) found.`);
+  } catch (e) { setStatus('Vuln audit error: ' + e.message); }
+  if (scan.canceling) { endScanUI(); S.busy = false; updateNav(); renderScan(); return; }
+
+  // ── 4. Cleanup analysis ────────────────────────────────────────────────────
+  scan.label = 'Full scan — cleanup analysis…'; paintScanBar();
+  try {
+    const r = await api.rpc('organize_scan', { path: S.organizeTarget });
+    S.organize = r;
+    setStatus(`Cleanup: ${r.recs.length} recommendation(s) in ${r.totalFiles.toLocaleString()} files.`);
+  } catch (e) { setStatus('Cleanup analysis error: ' + e.message); }
+
+  endScanUI(); S.busy = false; S.scanned = true; updateNav();
+  const total = S.data.Files.length + S.data.Processes.length + S.data.Vulnerabilities.length;
+  setStatus(`Full scan complete · ${total} finding(s) · offline.`);
+  if (S.page === 'Files') renderScan();
 }
 async function sweep() {
   if (S.busy) return; S.busy = true; startScanUI('Inspecting processes…');
@@ -634,9 +694,9 @@ function setMode(mode) {
 function setStatus(s) { $('status').textContent = s; }
 
 // ---------- live scan timer / throughput / ETA ----------
-let scan = { start: 0, count: 0, total: 0, timer: null, active: false, label: '' };
+let scan = { start: 0, count: 0, total: 0, timer: null, active: false, label: '', canceling: false };
 function startScanUI(label) {
-  scan = { start: Date.now(), count: 0, total: 0, timer: null, active: true, label };
+  scan = { start: Date.now(), count: 0, total: 0, timer: null, active: true, label, canceling: false };
   $('scanbar').classList.remove('hidden'); paintScanBar();
   scan.timer = setInterval(paintScanBar, 250);
 }
@@ -668,9 +728,12 @@ function paintScanBar() {
   const stat = (v, l) => `<span class="x"><div class="v">${v}</div><div class="l">${l}</div></span>`;
   const track = pct === null ? '<span class="track"><i></i></span>'
     : `<span class="track det"><b style="width:${pct.toFixed(1)}%"></b></span>`;
-  $('scanbar').innerHTML = `<span class="spin"></span><span class="lbl">${scan.label}</span>${track}
+  const stopBtn = scan.canceling
+    ? `<button class="btn ghost stopbtn" data-action="stop" disabled style="opacity:.6">Stopping…</button>`
+    : `<button class="btn danger stopbtn" data-action="stop">Stop</button>`;
+  $('scanbar').innerHTML = `<span class="spin"></span><span class="lbl">${scan.canceling ? 'Cancelling…' : scan.label}</span>${track}
     <span class="nums">${stat(scan.count.toLocaleString(), 'files')}${stat(fmtTime(sec), 'elapsed')}${stat(eta, 'remaining')}${stat(Math.round(rate).toLocaleString(), '/sec')}</span>
-    <button class="btn danger stopbtn" data-action="stop">Stop</button>`;
+    ${stopBtn}`;
 }
 
 init();

@@ -296,7 +296,7 @@ def _dup_groups(by_size: dict, progress, imp: set | None = None) -> list:
         for d, dup in seen.items():
             if len(dup) < 2:
                 continue
-            dup.sort(key=lambda p: p.stat().st_mtime)  # oldest = keep
+            dup.sort(key=lambda p: p.stat().st_mtime, reverse=True)  # newest = keep
             groups.append({"size": size, "human": _human(size),
                            "keep": _info(dup[0]),
                            "copies": [_info(x) for x in dup[1:]]})

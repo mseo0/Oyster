@@ -66,3 +66,23 @@ def find_tool(name: str) -> str | None:
         if cand.is_file() and os.access(cand, os.X_OK):
             return str(cand)
     return None
+
+
+def find_clamav_db() -> str | None:
+    """Return a path to a ClamAV database directory that contains .cvd/.cld files,
+    or None if only the system default should be used (clamscan finds it itself)."""
+    candidates: list[Path] = []
+    if sys.platform.startswith("win"):
+        local = Path(os.environ.get("LOCALAPPDATA", "")) / "ClamAV" / "db"
+        pf = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "ClamAV" / "database"
+        candidates = [local, pf]
+    elif sys.platform == "darwin":
+        candidates = [Path("/usr/local/var/lib/clamav"),
+                      Path("/opt/homebrew/var/lib/clamav"),
+                      Path.home() / ".clamav"]
+    else:
+        candidates = [Path("/var/lib/clamav"), Path("/var/lib/clamav/db")]
+    for d in candidates:
+        if d.is_dir() and any(d.glob("*.cvd")) or (d.is_dir() and any(d.glob("*.cld"))):
+            return str(d)
+    return None

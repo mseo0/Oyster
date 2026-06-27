@@ -67,6 +67,9 @@ button { font-family: inherit; cursor: pointer; }
   font-size: 14px; font-weight: 600; text-align: left; }
 .nav-btn:hover { background: var(--rowhover); }
 .nav-btn.active { background: var(--accent-soft); color: var(--accent); }
+.full-scan-btn { margin-top: 6px; color: var(--accent);
+  background: var(--accent-soft); border: 1px solid rgba(43,194,214,0.22); }
+.full-scan-btn:hover { background: var(--accent-btn); color: #fff; border-color: transparent; }
 .nav-btn .lbl { flex: 1; }
 .nav-badge { font: 600 10.5px 'JetBrains Mono'; padding: 1px 7px; border-radius: 7px; }
 .spacer { flex: 1; }
@@ -287,3 +290,58 @@ button { font-family: inherit; cursor: pointer; }
 .g-foot { display: flex; align-items: center; gap: 12px; }
 .g-foot .gmsg { flex: 1; font-size: 12px; }
 .hidden { display: none !important; }
+
+/* ── Windows platform overrides ──────────────────────────────────────────────
+   Applied via .platform-win32 on <html> when running on Windows.
+   Goals:
+     • True frosted-glass: transparent window + CSS backdrop-filter blurs the
+       real desktop content behind the window (same visual as macOS vibrancy,
+       powered by CSS instead of native NSVisualEffectView).
+     • Custom title bar with Win-style min/max/close buttons replacing the
+       native opaque title bar.
+     • Slightly adjusted spacing since there are no macOS traffic lights.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/* Give the window a subtle dark base so gaps between panels don't look bare */
+.platform-win32 html,
+.platform-win32 body { background: rgba(10, 13, 18, 0.82); }
+
+/* The sidebar blurs against the transparent window background (real desktop) */
+.platform-win32 .sidebar {
+  backdrop-filter: blur(32px) saturate(1.6);
+  -webkit-backdrop-filter: blur(32px) saturate(1.6);
+  padding-top: 12px; /* no macOS traffic lights to clear */
+}
+
+/* Panels blur more aggressively so the desktop content reads as frosted */
+.platform-win32 .panel {
+  backdrop-filter: blur(32px) saturate(1.8);
+  -webkit-backdrop-filter: blur(32px) saturate(1.8);
+}
+
+/* Less top clearance in the brand since no traffic lights */
+.platform-win32 .brand { padding-top: 14px; }
+
+/* Push main content down so it clears the 32px custom title bar */
+.platform-win32 .main { padding-top: 44px; }
+
+/* ── Custom Windows title bar ─────────────────────────────────────────────── */
+.win-titlebar {
+  display: none; /* hidden unless .platform-win32 */
+  position: fixed; top: 0; left: 246px; right: 0; height: 32px;
+  align-items: center; z-index: 200;
+  -webkit-app-region: drag;
+}
+.platform-win32 .win-titlebar { display: flex; }
+.win-drag { flex: 1; height: 100%; }
+.win-controls {
+  display: flex; height: 100%;
+  -webkit-app-region: no-drag;
+}
+.win-btn {
+  width: 46px; height: 100%; border: none; background: transparent;
+  color: var(--muted); display: flex; align-items: center; justify-content: center;
+  transition: background .1s, color .1s;
+}
+.win-btn:hover { background: rgba(128, 128, 128, 0.18); color: var(--text); }
+.win-close:hover { background: #E81123; color: #fff; }

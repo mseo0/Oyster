@@ -32,11 +32,27 @@ yarn-error.log*
 # Icon build intermediate (the .icns/.ico/.png outputs are kept)
 branding/Oyster.iconset/
 
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+pip-wheel-metadata/
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
 # macOS / editors
 .DS_Store
 *.swp
 .idea/
 .vscode/
+
+# GitHub Copilot workspace instructions (local only)
+.github/copilot-instructions.md
 
 # Bundled ClamAV is assembled in CI (binaries + DB), not committed
 desktop/resources/clamav/*

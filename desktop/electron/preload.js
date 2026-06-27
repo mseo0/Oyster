@@ -9,4 +9,6 @@ contextBridge.exposeInMainWorld('oyster', {
   setTheme: (mode) => ipcRenderer.invoke('set-theme', mode),
   reveal: (p) => ipcRenderer.invoke('reveal', p),
   onEvent: (cb) => ipcRenderer.on('engine-event', (_e, msg) => cb(msg)),
+  platform: process.platform,
+  winAction: (action) => ipcRenderer.invoke('win-action', action),
 });

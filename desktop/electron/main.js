@@ -14,6 +14,9 @@ const dbg = (m) => { try { fs.appendFileSync(LOG, `${new Date().toISOString()} $
 process.on('uncaughtException', (e) => dbg('UNCAUGHT ' + (e && e.stack || e)));
 process.on('unhandledRejection', (e) => dbg('UNHANDLED ' + (e && e.stack || e)));
 
+const mac = process.platform === 'darwin';
+const win32 = process.platform === 'win32';
+
 let win = null;
 let engine = null;
 let nextId = 1;
@@ -73,19 +76,17 @@ function rpc(method, params) {
 }
 
 function createWindow() {
-  const mac = process.platform === 'darwin';
-  const win32 = process.platform === 'win32';
   win = new BrowserWindow({
     width: 1280, height: 840, minWidth: 1060, minHeight: 700,
-    titleBarStyle: mac ? 'hiddenInset' : 'default',
-    // true see-through glass: the window itself is translucent and blurs
-    // whatever is BEHIND it (desktop, other windows) via the OS compositor.
-    // (vibrancy + a transparent backgroundColor is the reliable combo; setting
-    //  `transparent:true` as well can disable vibrancy on some versions.)
-    vibrancy: mac ? 'under-window' : undefined,          // macOS NSVisualEffectView
+    titleBarStyle: mac ? 'hiddenInset' : 'hidden',
+    // macOS: vibrancy blurs whatever is behind the window via the OS compositor.
+    // (transparent:true can disable vibrancy on some macOS versions — avoid it.)
+    // Windows: transparent:true lets CSS backdrop-filter blur the real desktop,
+    // giving the same frosted-glass look powered entirely by CSS.
+    vibrancy: mac ? 'under-window' : undefined,
     visualEffectState: 'active',
-    backgroundMaterial: win32 ? 'acrylic' : undefined,   // Windows 11 acrylic
-    backgroundColor: '#00000000',                        // no opaque paint
+    transparent: win32,
+    backgroundColor: '#00000000',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -122,6 +123,14 @@ ipcMain.handle('open-fda', () => {
 ipcMain.handle('set-theme', (_e, mode) => { nativeTheme.themeSource = mode; });
 // reveal a file in Finder/Explorer so the user can review it
 ipcMain.handle('reveal', (_e, p) => { try { shell.showItemInFolder(p); } catch {} });
+// custom window controls (used by the Windows title bar)
+ipcMain.handle('win-action', (_e, action) => {
+  if (!win) return false;
+  if (action === 'minimize') win.minimize();
+  else if (action === 'maximize') win.isMaximized() ? win.unmaximize() : win.maximize();
+  else if (action === 'close') win.close();
+  return win ? win.isMaximized() : false;
+});
 
 app.whenReady().then(() => {
   try { nativeTheme.themeSource = 'dark'; } catch (e) { dbg('theme ' + e); }
