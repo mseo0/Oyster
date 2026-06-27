@@ -36,9 +36,9 @@ def full_disk_access() -> Check:
     try:
         with open(probe, "rb") as fh:
             fh.read(1)
-        return Check("fda", name, True, required=True, detail="granted")
+        return Check("fda", name, True, required=False, detail="granted")
     except PermissionError:
-        return Check("fda", name, False, required=True,
+        return Check("fda", name, False, required=False,
                      detail="not granted — private & system folders will be "
                             "skipped during a scan",
                      fix="System Settings → Privacy & Security → Full Disk "
@@ -49,9 +49,9 @@ def full_disk_access() -> Check:
         try:
             if alt.exists():
                 list(alt.iterdir())
-            return Check("fda", name, True, required=True, detail="granted")
+            return Check("fda", name, True, required=False, detail="granted")
         except PermissionError:
-            return Check("fda", name, False, required=True,
+            return Check("fda", name, False, required=False,
                          detail="not granted",
                          fix="System Settings → Privacy & Security → Full Disk "
                              "Access → add Oyster, then re-check")

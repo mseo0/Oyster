@@ -26,6 +26,17 @@ def _short(p: Path, maxlen: int = 70) -> str:
     return s if len(s) <= maxlen else "…" + s[-(maxlen - 1):]
 
 
+def count_candidates(cfg: config.ScanConfig, cap: int = 400_000) -> int:
+    """Fast pre-count of files to be scanned (walk only, no hashing) so the UI
+    can estimate time remaining. Capped so a whole-disk count can't run away."""
+    n = 0
+    for _ in walk(cfg):
+        n += 1
+        if n >= cap:
+            break
+    return n
+
+
 @dataclass
 class ScanReport:
     files_seen: int = 0
@@ -36,6 +47,7 @@ class ScanReport:
     engine_available: bool = False
     process_threats: int = 0
     vulnerabilities: int = 0
+    canceled: bool = False
 
 
 class Scanner:
@@ -46,7 +58,7 @@ class Scanner:
         self.engine = ClamEngine(extra_yara_dir=rules_dir)
 
     def scan(self, progress: ProgressFn = lambda s: None,
-             vuln: bool = True) -> ScanReport:
+             vuln: bool = True, cancel=lambda: False) -> ScanReport:
         report = ScanReport(engine_available=self.engine.available)
         progress(self.engine.status())
         roots = ", ".join(str(r) for r in self.cfg.roots)
@@ -54,6 +66,11 @@ class Scanner:
 
         last = 0.0
         for cand in walk(self.cfg):
+            if cancel():
+                self.cache.flush()
+                report.canceled = True
+                progress(f"Canceled · {report.files_seen:,} files scanned.")
+                return report
             report.files_seen += 1
             # throttle the live "current file" line to ~10/sec so it stays
             # readable and never floods the UI event loop.

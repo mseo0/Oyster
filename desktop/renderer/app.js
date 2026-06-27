@@ -16,6 +16,9 @@ const ICON = {
   search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
   deep: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
   refresh: '<path d="M21 12a9 9 0 1 1-2.6-6.4M21 4v5h-5"/>',
+  broom: '<path d="M19.4 4.6 13 11M11 8l5 5M8.5 10.5 3 16c-1 1-1 3 0 4s3 1 4 0l5.5-5.5M4 21l3-1"/>',
+  trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>',
+  sort: '<path d="M3 6h13M3 12h9M3 18h5M17 9l3 3 3-3M20 12V4"/>',
 };
 const ic = (k, w = 18) => `<svg width="${w}" height="${w}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICON[k]}</svg>`;
 
@@ -23,6 +26,7 @@ const NAV = [
   { key: 'Files', icon: 'folder', sub: 'On-demand file scan with reversible quarantine.', sec: 'scan' },
   { key: 'Processes', icon: 'cpu', sub: 'Running programs, scored by suspicious behaviour.', sec: 'scan' },
   { key: 'Vulnerabilities', icon: 'shield', sub: 'Installed software & OS settings vs. offline CVE data.', sec: 'scan' },
+  { key: 'Cleanup', icon: 'broom', sub: 'Find junk, duplicates & clutter — organize with one click.', sec: 'tools' },
   { key: 'AI Summary', icon: 'spark', sub: 'A plain-English read-out, written locally just now.', sec: 'report' },
 ];
 
@@ -30,7 +34,8 @@ const S = {
   page: 'Files', model: '…', target: '~/Downloads',
   data: { Files: [], Processes: [], Vulnerabilities: [] },
   sel: { Files: null, Processes: null, Vulnerabilities: null },
-  report: null, summary: '', busy: false,
+  report: null, summary: '', busy: false, scanned: false, downloadedOnly: true,
+  organizeTarget: '~/Downloads', organize: null, procTotal: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -47,13 +52,33 @@ async function init() {
     const n = e.target.closest('[data-page]'); if (n) showPage(n.dataset.page);
   });
   content.addEventListener('click', onContentClick);
-  api.onEvent((m) => { if (m.event === 'progress') onProgress(m.data); });
+  // gate "Open Settings" (was dead — no listener on the gate element)
+  $('gate').addEventListener('click', (e) => {
+    if (e.target.closest('[data-action="open-fda"]')) api.openFDA();
+  });
+  // stop button lives in the live scan bar
+  $('scanbar').addEventListener('click', (e) => {
+    if (e.target.closest('[data-action="stop"]')) { api.rpc('cancel'); setStatus('Stopping…'); }
+  });
+  api.onEvent((m) => {
+    if (m.event === 'progress') onProgress(m.data);
+    else if (m.event === 'total') { scan.total = m.data; }
+  });
   try {
     const h = await api.rpc('hello');
     S.model = h.model; S.target = h.defaultTarget;
     $('model-chip').textContent = 'model · ' + h.model;
   } catch (e) { /* gate still works */ }
-  refreshGate();
+  gateLoop();   // auto-check; auto-proceed the moment required checks pass
+}
+
+let gateTimer = null;
+async function gateLoop() {
+  const blocked = await refreshGate();
+  if (blocked === 0) { launch(); return; }
+  // keep polling so that as soon as the user grants Full Disk Access in
+  // Settings, the app proceeds on its own — no need to click anything.
+  gateTimer = setTimeout(gateLoop, 1500);
 }
 
 // ---------- preflight gate ----------
@@ -71,18 +96,24 @@ async function refreshGate() {
   }).join('');
   const blocked = checks.filter((c) => c.required && !c.ok);
   $('gate-launch').disabled = blocked.length > 0;
+  $('gate-launch').textContent = blocked.length ? 'Waiting for permissions…' : 'Launching…';
   $('gate-msg').textContent = blocked.length
-    ? 'Required, still missing: ' + blocked.map((b) => b.name).join(', ')
+    ? 'Auto-continues the moment Full Disk Access is granted — ' + blocked.map((b) => b.name).join(', ')
     : 'All required permissions granted.';
   $('gate-msg').style.color = blocked.length ? '#E5484D' : '#17A98C';
+  return blocked.length;
 }
-function launch() { $('gate').classList.add('hidden'); showPage('Files'); }
+function launch() {
+  if (gateTimer) { clearTimeout(gateTimer); gateTimer = null; }
+  if ($('gate').classList.contains('hidden')) return;   // already launched
+  $('gate').classList.add('hidden'); showPage('Files');
+}
 
 // ---------- nav ----------
 function buildNav() {
-  const scan = NAV.filter((n) => n.sec === 'scan').map(navBtn).join('');
-  const rep = NAV.filter((n) => n.sec === 'report').map(navBtn).join('');
-  $('nav-scan').innerHTML = scan; $('nav-report').innerHTML = rep;
+  $('nav-scan').innerHTML = NAV.filter((n) => n.sec === 'scan').map(navBtn).join('');
+  $('nav-tools').innerHTML = NAV.filter((n) => n.sec === 'tools').map(navBtn).join('');
+  $('nav-report').innerHTML = NAV.filter((n) => n.sec === 'report').map(navBtn).join('');
 }
 function navBtn(n) {
   return `<button class="nav-btn" data-page="${n.key}">${ic(n.icon)}
@@ -92,8 +123,8 @@ function updateNav() {
   document.querySelectorAll('.nav-btn').forEach((b) =>
     b.classList.toggle('active', b.dataset.page === S.page));
   for (const key of ['Files', 'Processes', 'Vulnerabilities']) {
-    const el = document.querySelector(`[data-badge="${key}"]`);
-    const n = S.data[key].length;
+    const el = document.querySelector(`[data-badge="${key}"]`); if (!el) continue;
+    const n = S.data[key].filter((o) => !o.resolved && o.severity !== 'info').length;
     const col = key === 'Processes' ? SEV.high : SEV.critical;
     el.textContent = n ? n : '';
     el.style.background = n ? tint(col, 0.14) : 'transparent';
@@ -107,7 +138,9 @@ function showPage(key) {
   $('h-title').textContent = key;
   $('h-sub').textContent = NAV.find((n) => n.key === key).sub;
   updateNav();
-  key === 'AI Summary' ? renderSummary() : renderScan();
+  if (key === 'AI Summary') renderSummary();
+  else if (key === 'Cleanup') renderOrganize();
+  else renderScan();
 }
 
 // ---------- scan view ----------
@@ -134,6 +167,8 @@ function taskbar() {
   if (S.page === 'Files') return `
     <div class="field"><span style="color:var(--accent);display:flex">${ic('folder', 16)}</span>
       <span class="k">Target</span><span class="v" id="target">${esc(S.target)}</span></div>
+    <button class="btn ghost ${S.downloadedOnly ? 'on' : ''}" data-action="toggle-downloaded"
+      title="Only flag downloaded files, not ones you created">${S.downloadedOnly ? '✓ ' : ''}Downloaded only</button>
     <button class="btn ghost" data-action="choose">Choose…</button>
     <button class="btn primary" data-action="scan">${ic('search', 15)} Scan</button>
     <button class="btn ghost icon" data-action="deep" title="Deep scan — whole computer">${ic('deep', 16)}</button>`;
@@ -170,9 +205,9 @@ function summaryData() {
   if (S.page === 'Processes') {
     const p = S.data.Processes, n = p.length, prot = p.filter((x) => x.protected).length;
     const color = n ? procColor(Math.max(...p.map((x) => x.score))) : SEV.info;
-    return { count: n, color, headline: n ? `${n} process(es) flagged` : 'Nothing flagged',
-      sub: n ? 'Highest-scoring shown first' : 'Sweep to inspect running processes',
-      stats: [{ v: n, l: 'FLAGGED' }, { v: prot, l: 'PROTECTED' }, { v: 0, l: 'STOPPED' }] };
+    return { count: n, color, headline: n ? `${n} process(es) flagged` : (S.procTotal != null ? 'All clear' : 'Nothing flagged'),
+      sub: S.procTotal != null ? `Swept ${S.procTotal.toLocaleString()} running processes` : 'Sweep to inspect running processes',
+      stats: [{ v: (S.procTotal || 0).toLocaleString(), l: 'SWEPT' }, { v: n, l: 'FLAGGED' }, { v: prot, l: 'PROTECTED' }] };
   }
   const v = S.data.Vulnerabilities, n = v.length;
   const cves = v.filter((x) => /cve/i.test(x.rule)).length;
@@ -185,7 +220,11 @@ function summaryData() {
 function renderRows() {
   const list = $('list'); const items = S.data[S.page];
   if (!items.length) {
-    list.innerHTML = `<div class="empty">${{ Files: 'Run a scan to see findings.', Processes: 'Sweep to inspect processes.', Vulnerabilities: 'Audit to list issues.' }[S.page]}</div>`;
+    const msg = {
+      Files: 'Run a scan to see findings.',
+      Processes: S.procTotal != null ? `✓ Swept ${S.procTotal.toLocaleString()} processes — nothing suspicious flagged.` : 'Sweep to inspect processes.',
+      Vulnerabilities: 'Audit to list issues.' }[S.page];
+    list.innerHTML = `<div class="empty">${msg}</div>`;
     return;
   }
   list.innerHTML = items.map((o, i) => rowHtml(o, i)).join('');
@@ -202,10 +241,14 @@ function rowHtml(o, i) {
   const c = SEV[o.severity] || SEV.info;
   const title = S.page === 'Files' ? o.name : o.rule;
   const meta = S.page === 'Files' ? `${esc(o.dir)} · ${esc(o.rule)}` : `${esc(o.target)} — ${esc(o.detail || o.rule)}`;
-  return `<button class="row${sel}" data-action="select" data-idx="${i}">
-    <span class="bar" style="background:${c}"></span>
+  const done = o.resolved ? ' resolved' : '';
+  const chip = o.resolved
+    ? `<span class="chip" style="background:${tint('#17A98C', 0.16)};color:#17A98C">${o.resolved === 'safe' ? 'SAFE' : 'QUAR'}</span>`
+    : `<span class="chip" style="background:${tint(c, 0.16)};color:${c}">${sevLabel(o.severity)}</span>`;
+  return `<button class="row${sel}${done}" data-action="select" data-idx="${i}">
+    <span class="bar" style="background:${o.resolved ? '#17A98C' : c}"></span>
     <span class="body"><span class="name">${esc(title)}</span><span class="meta">${meta}</span></span>
-    <span class="chip" style="background:${tint(c, 0.16)};color:${c}">${sevLabel(o.severity)}</span></button>`;
+    ${chip}</button>`;
 }
 
 function renderInspector() {
@@ -221,20 +264,23 @@ function aiBox(text, action, color) {
 function kvTable(pairs) {
   return `<div class="kv">${pairs.map(([k, v]) => `<div class="r"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join('')}</div>`;
 }
+const ACT_COLOR = { QUARANTINE: '#E5484D', SUSPEND: '#17A98C', KILL: '#E5484D',
+  ASK_USER: '#E5B003', REVIEW: '#E5B003', IGNORE: '#8E938A', OK: '#17A98C' };
 function inspectFinding(f, vuln) {
   const c = SEV[f.severity] || SEV.info;
-  const crit = f.severity === 'critical' || f.severity === 'high';
   const pairs = Object.entries(f.evidence || {}); if (!pairs.length) pairs.push(['rule', f.rule]);
-  const ai = vuln ? aiBox(f.detail || 'Known vulnerability in installed software.')
-    : aiBox(crit ? 'Strong match — recommend isolating this file.' : 'Low confidence; review before acting.',
-            crit ? 'QUARANTINE' : 'ASK_USER', crit ? '#E5484D' : '#E5B003');
+  // richer, server-generated explanation + recommended action
+  const ai = aiBox(f.ai || f.detail || 'Reviewed by Oyster.', f.action, ACT_COLOR[f.action]);
+  const srcTag = (!vuln && f.source) ? `<span class="tag" style="background:${f.source === 'downloaded' ? tint('#0E7C8C', 0.16) : tint('#E5B003', 0.16)};color:${f.source === 'downloaded' ? 'var(--accent)' : '#E5B003'}">${f.source}</span>` : '';
+  const done = f.quarantined ? `<div class="note-sm" style="color:#17A98C">✓ Quarantined — moved to the reversible vault.</div>` : '';
   const actions = vuln
     ? `<button class="btn ghost" data-action="copyfix" style="width:100%;height:40px;margin-top:20px">Copy upgrade command</button>`
-    : `<div class="ins-actions"><button class="btn danger" data-action="quarantine">Quarantine</button>
+    : (f.quarantined ? done
+      : `<div class="ins-actions"><button class="btn danger" data-action="quarantine">Quarantine</button>
        <button class="btn ghost" data-action="marksafe">Mark safe</button></div>
-       <div class="note-sm">Quarantine is reversible — files move to a vault, never deleted.</div>`;
+       <div class="note-sm">Quarantine is reversible — files move to a vault, never deleted.</div>`);
   return `<div><span class="chip" style="background:${tint(c, 0.16)};color:${c}">${sevLabel(f.severity)}</span>
-      <span class="kind"> ${esc((f.kind || '').replace(/_/g, ' '))}</span></div>
+      <span class="kind"> ${esc((f.kind || '').replace(/_/g, ' '))}</span>${srcTag}</div>
     <div class="ins-title">${esc(vuln ? f.rule : f.name)}</div>
     <div class="ins-dir" style="${vuln ? 'color:var(--accent)' : ''}">${esc(vuln ? f.target : f.dir + '/')}</div>
     ${f.detail ? `<p class="ins-detail">${esc(f.detail)}</p>` : ''}
@@ -244,8 +290,7 @@ function inspectProc(t) {
   const c = procColor(t.score);
   const reasons = (t.reasons.length ? t.reasons : ['No specific reasons recorded.'])
     .map((r) => `<div class="reason"><span class="d" style="background:${c}"></span><span class="x">${esc(r)}</span></div>`).join('');
-  const ai = aiBox(t.score >= 50 ? 'Behaviour is consistent with masquerading — suspend and review.' : 'Looks unusual but low risk.',
-    t.score >= 50 ? 'SUSPEND' : 'REVIEW', t.score >= 50 ? '#17A98C' : '#E5B003');
+  const ai = aiBox(t.ai || 'Reviewed by Oyster.', t.action, ACT_COLOR[t.action]);
   return `<div style="display:flex;align-items:center;gap:12px">
       <span class="sq" style="width:44px;height:44px;background:${tint(c, 0.16)};color:${c};font-size:16px">${t.score}</span>
       <div><div style="font:600 16px 'JetBrains Mono'">${esc(t.name)}</div>
@@ -259,8 +304,45 @@ function inspectProc(t) {
     <div class="note-sm">Suspend freezes the process — reversible. Protected processes are never killed.</div>`;
 }
 
+// ---------- Cleanup / Organize ----------
+const ORG_ICON = { organize: 'sort', junk: 'trash', duplicates: 'folder', large: 'deep', stale: 'refresh' };
+function renderOrganize() {
+  const o = S.organize;
+  const recs = o ? o.recs.map((r) => `
+    <div class="rec panel">
+      <span class="rec-ic" style="color:var(--accent)">${ic(ORG_ICON[r.kind] || 'broom', 18)}</span>
+      <div class="rec-x"><div class="rec-t">${esc(r.title)}</div><div class="rec-d">${esc(r.detail)}</div></div>
+      ${r.human ? `<div class="rec-sz">${r.human}</div>` : ''}
+      <button class="btn ${r.kind === 'organize' ? 'primary' : 'ghost'}" data-action="organize-apply" data-key="${r.key}">
+        ${r.kind === 'organize' ? 'Organize' : 'Clean up'}</button>
+    </div>`).join('') : '';
+  const body = !o
+    ? `<div class="empty">Choose a folder and Analyze to get cleanup recommendations.</div>`
+    : (o.recs.length
+        ? `<div class="rec-head">${o.totalFiles.toLocaleString()} files · ${o.totalHuman} in <span class="mono" style="color:var(--accent)">${esc(o.folder)}</span></div>${recs}`
+        : `<div class="empty">Nothing to clean up — this folder looks tidy. ✨</div>`);
+  content.innerHTML = `
+    <div class="taskbar panel">
+      <div class="field"><span style="color:var(--accent);display:flex">${ic('broom', 16)}</span>
+        <span class="k">Folder</span><span class="v" id="org-target">${esc(S.organizeTarget)}</span></div>
+      <button class="btn ghost" data-action="organize-choose">Choose…</button>
+      <button class="btn primary" data-action="organize-analyze">${ic('search', 15)} Analyze</button>
+    </div>
+    <div class="cleanup-body">${body}</div>`;
+}
+
 // ---------- AI summary ----------
 async function renderSummary() {
+  if (!S.scanned) {     // only generate after at least one scan/sweep/audit
+    content.innerHTML = `<div class="summary-page"><div class="inner">
+      <div class="hero panel"><div class="orb"><span class="ring2" style="border-color:var(--muted2)"></span>
+        <span class="n" style="color:var(--muted2)">${ic('spark', 22)}</span></div>
+        <div><div class="big">No scan yet</div>
+        <div class="sub3">Run a scan, process sweep, or vulnerability audit first — then the local model writes a plain-English summary of what it found.</div></div></div>
+      <div class="prose panel" style="color:var(--muted)">The AI summary is generated <b>after</b> a scan completes, from the recorded findings — never speculatively.</div>
+    </div></div>`;
+    return;
+  }
   const n = S.data.Files.length + S.data.Processes.length + S.data.Vulnerabilities.length;
   content.innerHTML = `<div class="summary-page"><div class="inner">
     <div class="hero panel"><div class="orb"><span class="ring1" style="background:var(--accent)"></span>
@@ -282,9 +364,10 @@ async function onContentClick(e) {
   const t = e.target.closest('[data-action]'); if (!t) return;
   const a = t.dataset.action;
   if (a === 'select') { S.sel[S.page] = S.data[S.page][+t.dataset.idx]; renderRows(); renderInspector(); return; }
-  if (a === 'open-fda') return api.rpc('open_settings', { key: 'fda' });
+  if (a === 'open-fda') return api.openFDA();
+  if (a === 'toggle-downloaded') { S.downloadedOnly = !S.downloadedOnly; renderScan(); return; }
   if (a === 'choose') { const d = await api.chooseFolder(); if (d) { S.target = d; const el = $('target'); if (el) el.textContent = d; } return; }
-  if (a === 'scan') return runScan('scan', { path: S.target });
+  if (a === 'scan') return runScan('scan', { path: S.target, downloadedOnly: S.downloadedOnly });
   if (a === 'deep') return deepScan();
   if (a === 'sweep') return sweep();
   if (a === 'audit') return audit();
@@ -292,14 +375,47 @@ async function onContentClick(e) {
   if (a === 'marksafe') return markSafe();
   if (a === 'suspend') return procAction('suspend');
   if (a === 'kill') return procAction('kill');
+  if (a === 'organize-choose') { const d = await api.chooseFolder(); if (d) { S.organizeTarget = d; const el = $('org-target'); if (el) el.textContent = d; } return; }
+  if (a === 'organize-analyze') return organizeAnalyze();
+  if (a === 'organize-apply') return organizeApply(t.dataset.key);
 }
+
+async function organizeAnalyze() {
+  if (S.busy) return; S.busy = true; startScanUI('Analyzing folder…');
+  try {
+    const r = await api.rpc('organize_scan', { path: S.organizeTarget });
+    S.organize = r; setStatus(`${r.totalFiles.toLocaleString()} files · ${r.recs.length} recommendation(s).`);
+  } catch (e) { setStatus('Analyze failed: ' + e.message); }
+  endScanUI(); S.busy = false; if (S.page === 'Cleanup') renderOrganize();
+}
+async function organizeApply(key) {
+  const rec = S.organize && S.organize.recs.find((r) => r.key === key); if (!rec) return;
+  const verb = rec.kind === 'organize' ? 'Organize into type folders'
+    : `Move ${rec.count} file(s) to a reversible cleanup vault`;
+  const r = await api.confirm({ message: rec.title, detail: verb +
+    '\n\nNothing is permanently deleted — files move into subfolders or a dated vault in ~/.oyster/cleanup you can restore from.',
+    buttons: ['Cancel', rec.kind === 'organize' ? 'Organize' : 'Clean up'] });
+  if (r !== 1) return;
+  try {
+    const res = await api.rpc('organize_apply', {
+      action: rec.kind === 'organize' ? 'organize' : rec.kind,
+      paths: rec.extra && rec.extra.paths ? rec.extra.paths : recPaths(rec),
+      folder: S.organize.folder, categories: rec.extra && rec.extra.categories,
+    });
+    setStatus(`Done · moved ${res.moved} file(s)` + (res.human ? ` · freed ${res.human}` : '') + (res.errors ? ` · ${res.errors} error(s)` : '') + '.');
+    const re = await api.rpc('organize_scan', { path: S.organizeTarget });
+    S.organize = re; if (S.page === 'Cleanup') renderOrganize();
+  } catch (e) { setStatus('Cleanup failed: ' + e.message); }
+}
+function recPaths(rec) { return (rec.extra && rec.extra.paths) || []; }
 
 async function runScan(method, params) {
   if (S.busy) return; S.busy = true; startScanUI('Scanning…');
   try {
     const r = await api.rpc(method, params);
-    S.report = r; S.data.Files = r.findings; S.sel.Files = null;
-    setStatus(`Done · ${r.filesSeen.toLocaleString()} files in ${r.secs}s · ${r.findings.length} finding(s)`
+    S.report = r; S.data.Files = r.findings; S.sel.Files = null; S.scanned = true;
+    setStatus((r.canceled ? 'Stopped' : 'Done')
+      + ` · ${r.filesSeen.toLocaleString()} files in ${r.secs}s · ${r.findings.length} finding(s)`
       + (r.filesUnreadable ? ` · ${r.filesUnreadable.toLocaleString()} unreadable` : '') + ' · offline.');
   } catch (e) { setStatus('Scan stopped: ' + e.message); }
   endScanUI(); S.busy = false; if (S.page === 'Files') renderScan();
@@ -314,13 +430,13 @@ async function deepScan() {
 }
 async function sweep() {
   if (S.busy) return; S.busy = true; startScanUI('Inspecting processes…');
-  try { const r = await api.rpc('sweep_processes'); S.data.Processes = r.processes; S.sel.Processes = null; setStatus(`${r.processes.length} suspicious process(es).`); }
+  try { const r = await api.rpc('sweep_processes'); S.data.Processes = r.processes; S.procTotal = r.total; S.sel.Processes = null; S.scanned = true; setStatus(`Swept ${(r.total||0).toLocaleString()} processes · ${r.processes.length} flagged.`); }
   catch (e) { setStatus('Sweep failed: ' + e.message); }
   endScanUI(); S.busy = false; if (S.page === 'Processes') renderScan(); updateNav();
 }
 async function audit() {
   if (S.busy) return; S.busy = true; startScanUI('Auditing software & OS…');
-  try { const r = await api.rpc('audit_vulns'); S.data.Vulnerabilities = r.vulns; S.sel.Vulnerabilities = null; setStatus(`${r.vulns.length} vulnerability finding(s).`); }
+  try { const r = await api.rpc('audit_vulns'); S.data.Vulnerabilities = r.vulns; S.sel.Vulnerabilities = null; S.scanned = true; setStatus(`${r.vulns.length} vulnerability finding(s).`); }
   catch (e) { setStatus('Audit failed: ' + e.message); }
   endScanUI(); S.busy = false; if (S.page === 'Vulnerabilities') renderScan(); updateNav();
 }
@@ -328,10 +444,19 @@ async function quarantine() {
   const f = S.sel.Files; if (!f) return;
   const r = await api.confirm({ message: 'Quarantine (reversible)', detail: f.target + '\n\nReason: ' + f.rule, buttons: ['Cancel', 'Quarantine'] });
   if (r !== 1) return;
-  try { const x = await api.rpc('quarantine', { target: f.target, rule: f.rule }); setStatus(`Quarantined (${x.qid}). Restorable.`); }
-  catch (e) { setStatus('Quarantine failed: ' + e.message); }
+  try {
+    const x = await api.rpc('quarantine', { target: f.target, rule: f.rule });
+    f.quarantined = true; f.resolved = 'quarantined';   // gray it out in the list
+    renderRows(); renderInspector(); updateNav();
+    setStatus(`Quarantined (${x.qid}). Moved to the reversible vault.`);
+  } catch (e) { setStatus('Quarantine failed: ' + e.message); }
 }
-async function markSafe() { const f = S.sel.Files; if (!f) return; await api.rpc('mark_safe', { target: f.target }); setStatus(`${f.name} marked safe.`); }
+async function markSafe() {
+  const f = S.sel.Files; if (!f) return;
+  await api.rpc('mark_safe', { target: f.target });
+  f.resolved = 'safe'; renderRows(); renderInspector();
+  setStatus(`${f.name} marked safe.`);
+}
 async function procAction(kind) {
   const t = S.sel.Processes; if (!t) return;
   if (t.protected) { await api.confirm({ message: 'Protected process', detail: t.name + ' is protected and will not be killed.', buttons: ['OK', 'OK'] }); return; }
@@ -345,13 +470,14 @@ async function procAction(kind) {
 function setMode(mode) {
   document.documentElement.dataset.theme = mode;
   document.querySelectorAll('.seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
+  if (api.setTheme) api.setTheme(mode);   // flip the native vibrancy material too
 }
 function setStatus(s) { $('status').textContent = s; }
 
-// ---------- live scan timer / throughput ----------
-let scan = { start: 0, count: 0, timer: null, active: false, label: '' };
+// ---------- live scan timer / throughput / ETA ----------
+let scan = { start: 0, count: 0, total: 0, timer: null, active: false, label: '' };
 function startScanUI(label) {
-  scan = { start: Date.now(), count: 0, timer: null, active: true, label };
+  scan = { start: Date.now(), count: 0, total: 0, timer: null, active: true, label };
   $('scanbar').classList.remove('hidden'); paintScanBar();
   scan.timer = setInterval(paintScanBar, 250);
 }
@@ -364,14 +490,27 @@ function onProgress(text) {
   const m = /([\d,]+)\s+seen/.exec(text); if (m) scan.count = parseInt(m[1].replace(/,/g, ''), 10);
 }
 function fmtTime(s) { const m = Math.floor(s / 60), ss = Math.floor(s % 60); return m + ':' + String(ss).padStart(2, '0'); }
+function fmtEta(s) {
+  if (s < 60) return '~' + Math.ceil(s) + 's';
+  if (s < 3600) return '~' + Math.round(s / 60) + ' min';
+  return '~' + (s / 3600).toFixed(1) + ' hr';
+}
 function paintScanBar() {
   if (!scan.active) return;
   const sec = (Date.now() - scan.start) / 1000;
-  const rate = sec > 0 ? Math.round(scan.count / sec) : 0;
+  const rate = sec > 0 ? scan.count / sec : 0;
+  // ETA from the pre-counted total (only available for targeted scans)
+  let eta = '—';
+  if (scan.total > 0 && rate > 0 && scan.count < scan.total) {
+    eta = fmtEta((scan.total - scan.count) / rate);
+  } else if (scan.total > 0 && scan.count >= scan.total) { eta = 'finishing…'; }
+  const pct = scan.total > 0 ? Math.min(100, (scan.count / scan.total) * 100) : null;
   const stat = (v, l) => `<span class="x"><div class="v">${v}</div><div class="l">${l}</div></span>`;
-  $('scanbar').innerHTML = `<span class="spin"></span><span class="lbl">${scan.label}</span>
-    <span class="track"><i></i></span>
-    <span class="nums">${stat(scan.count.toLocaleString(), 'files')}${stat(fmtTime(sec), 'elapsed')}${stat(rate.toLocaleString(), '/sec')}</span>`;
+  const track = pct === null ? '<span class="track"><i></i></span>'
+    : `<span class="track det"><b style="width:${pct.toFixed(1)}%"></b></span>`;
+  $('scanbar').innerHTML = `<span class="spin"></span><span class="lbl">${scan.label}</span>${track}
+    <span class="nums">${stat(scan.count.toLocaleString(), 'files')}${stat(fmtTime(sec), 'elapsed')}${stat(eta, 'remaining')}${stat(Math.round(rate).toLocaleString(), '/sec')}</span>
+    <button class="btn danger stopbtn" data-action="stop">Stop</button>`;
 }
 
 init();

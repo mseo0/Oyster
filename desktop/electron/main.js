@@ -3,10 +3,16 @@
 // Spawns the Python engine sidecar (stdio JSON-RPC), makes the frosted-glass
 // window, and relays RPC + streamed progress events to the renderer.
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 const readline = require('readline');
+
+const LOG = path.join(app.getPath('temp'), 'oyster-main.log');
+const dbg = (m) => { try { fs.appendFileSync(LOG, `${new Date().toISOString()} ${m}\n`); } catch {} };
+process.on('uncaughtException', (e) => dbg('UNCAUGHT ' + (e && e.stack || e)));
+process.on('unhandledRejection', (e) => dbg('UNHANDLED ' + (e && e.stack || e)));
 
 let win = null;
 let engine = null;
@@ -104,12 +110,23 @@ ipcMain.handle('confirm', async (_e, opts) => {
   });
   return r.response;
 });
+// reliably open the macOS Full Disk Access pane (the in-Python `open` was flaky)
+ipcMain.handle('open-fda', () => {
+  if (process.platform === 'darwin') {
+    return shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles');
+  }
+  if (process.platform === 'win32') return shell.openExternal('ms-settings:privacy');
+});
+// drive the native window appearance from the in-app Light/Dark toggle so the
+// vibrancy material (frosted glass) matches — otherwise light mode stays dark.
+ipcMain.handle('set-theme', (_e, mode) => { nativeTheme.themeSource = mode; });
 
 app.whenReady().then(() => {
-  startEngine();
+  try { nativeTheme.themeSource = 'dark'; } catch (e) { dbg('theme ' + e); }
+  try { startEngine(); } catch (e) { dbg('startEngine ' + (e.stack || e)); }
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
-});
+}).catch((e) => dbg('whenReady ' + (e.stack || e)));
 
 app.on('window-all-closed', () => {
   if (engine && !engine.killed) engine.kill();

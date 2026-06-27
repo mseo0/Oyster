@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Build, sign, and install Oyster.app to /Applications with a VALID, stable
-# signature so a single Full Disk Access grant persists across relaunches.
+# Build the engine + Electron app and install a VALID, launchable Oyster.app.
 #
-# Why this matters: macOS TCC keys the FDA grant to the app's code signature.
-# A broken/ad-hoc-detritus signature won't persist, and copying with `cp -R`
-# corrupts it. This script signs cleanly (engine first, then app) and installs
-# with `ditto`, which preserves the signature.
+# Two macOS gotchas this handles:
+#  1) Copying the app (ditto/cp) re-adds com.apple.FinderInfo / provenance /
+#     fileprovider xattrs that make codesign reject the bundle ("resource fork,
+#     Finder information, or similar detritus"). So we sign AFTER the copy, in
+#     place, having run dot_clean + xattr -cr first.
+#  2) A broken signature makes LaunchServices silently refuse to launch the app
+#     (it runs from a terminal but not from Finder). A clean --deep ad-hoc sign
+#     fixes that; codesign --verify --strict must pass.
 #
-# For persistence across REBUILDS (and no Gatekeeper prompt), sign with a stable
-# identity instead of ad-hoc — see scripts/selfsign-mac.sh or an Apple
-# Developer ID. Ad-hoc persists per-build only (the cdhash changes each build).
+# For a signature that ALSO survives rebuilds + no Gatekeeper prompt, sign with
+# an Apple Developer ID (or finish scripts/selfsign-mac.sh) instead of ad-hoc.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -17,27 +19,28 @@ cd "$ROOT"
 echo "== building engine (onedir) =="
 .venv/bin/python -m PyInstaller --noconfirm --clean packaging/engine.spec
 
-echo "== packaging Electron app =="
-cd desktop
-env -u ELECTRON_RUN_AS_NODE CSC_IDENTITY_AUTO_DISCOVERY=false npm run dist:mac
-APP="dist/mac-arm64/Oyster.app"
-ENGINE="$APP/Contents/Resources/engine/oyster-engine/oyster-engine"
-
-echo "== signing (clean, inner-first) =="
-xattr -cr "$APP"                       # strip Finder-info/resource-fork detritus
-codesign --force --sign - "$ENGINE"    # sign the engine the scanner runs in
-codesign --force --deep --sign - "$APP"
-codesign --verify --strict "$APP" && echo "  signature valid ✓"
+echo "== packaging Electron app (dmg) =="
+( cd desktop && env -u ELECTRON_RUN_AS_NODE CSC_IDENTITY_AUTO_DISCOVERY=false \
+    npm run dist:mac )
+SRC="desktop/dist/mac-arm64/Oyster.app"
+[ -d "$SRC/Contents/Resources/engine/oyster-engine" ] \
+  || { echo "!! engine not bundled — build incomplete"; exit 1; }
 
 echo "== installing to /Applications =="
+APP="/Applications/Oyster.app"
 pkill -f "Oyster.app" 2>/dev/null || true
 sleep 1
-rm -rf /Applications/Oyster.app
-ditto "$APP" /Applications/Oyster.app  # ditto preserves the signature (cp -R does not)
-xattr -cr /Applications/Oyster.app
+rm -rf "$APP"
+ditto "$SRC" "$APP"
+
+echo "== signing in place (after the copy) =="
+dot_clean -m "$APP" 2>/dev/null || true     # strip resource forks / Finder info
+xattr -cr "$APP" 2>/dev/null || true         # strip provenance / fileprovider xattrs
+codesign --force --deep --sign - "$APP"
+codesign --verify --strict "$APP" && echo "  signature valid ✓"
+xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 
 echo
-echo "Installed /Applications/Oyster.app"
-echo "Grant Full Disk Access ONCE (System Settings → Privacy & Security →"
-echo "Full Disk Access → add Oyster). It now persists across relaunches of this"
-echo "build — the engine runs in-process of the app's TCC grant (onedir)."
+echo "Installed /Applications/Oyster.app — launch it from Finder/Launchpad."
+echo "Grant Full Disk Access (System Settings → Privacy & Security) for"
+echo "whole-computer / private-folder scans; it's optional for targeted scans."

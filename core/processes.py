@@ -112,6 +112,16 @@ def inspect(check_signatures: bool = True) -> list[ProcThreat]:
     return sorted(threats, key=lambda t: t.score, reverse=True)
 
 
+def total_count() -> int:
+    """How many processes are running right now (for 'swept N · M flagged')."""
+    if psutil is None:
+        return 0
+    try:
+        return sum(1 for _ in psutil.process_iter())
+    except Exception:
+        return 0
+
+
 def suspend(pid: int) -> None:
     """Suspend (freeze) rather than kill — reversible, gentler default."""
     if psutil is None:

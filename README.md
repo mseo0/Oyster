@@ -67,12 +67,14 @@ Here's where each piece lives if you want to poke around:
 | AI | [agent/](agent/) | local Ollama, with a no-AI fallback when it's off |
 | Updater | [updater/update.py](updater/update.py) | the one and only piece allowed online |
 | CLI | [cli/scan.py](cli/scan.py) | `python -m cli.scan` |
-| UI | [ui/app.py](ui/app.py) | a plain desktop app — no Rust or Node to build |
+| Engine sidecar | [sidecar/server.py](sidecar/server.py) | wraps core/ as stdio JSON-RPC for the app |
+| Desktop app | [desktop/](desktop/) | Electron UI (real frosted glass) driving the Python engine |
+| Cleanup/organize | [core/organize.py](core/organize.py) | finds junk/dupes/clutter, recommends tidy-up |
 
 ## Getting set up
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt   # the Python engine's deps
 
 # The detection engine isn't a pip package — install it on its own:
 #   macOS:    brew install clamav && freshclam
@@ -80,29 +82,33 @@ pip install -r requirements.txt
 
 # The local model is optional. Without it, Oyster still works and falls back to
 # plain heuristic reports. With it, you get the readable explanations:
-ollama pull llama3.2:3b      # the right size for 8GB; picked automatically
+ollama pull qwen3:8b         # sized to your RAM; picked automatically
 ```
 
-The desktop app uses Tkinter, which ships with most Python builds. If
-`python -m ui.app` complains about `No module named '_tkinter'`, your Python was
-compiled without it — `brew install python-tk` on macOS, or grab the installer
-from python.org. The Windows installer already includes it. (The CLI doesn't need
-Tk at all.)
+The UI is a cross-platform **Electron desktop app** (real frosted glass) that
+drives the Python engine as a stdio sidecar — see [desktop/README.md](desktop/README.md)
+for dev/build steps. The previous Tkinter UI is archived under `legacy/`.
 
 ## Using it
 
+**Desktop app** (recommended):
+
 ```bash
-# Scan a folder and decide what to do about anything it finds
-python -m cli.scan --apply ~/Downloads
+./scripts/install-mac.sh      # build + install /Applications/Oyster.app  (macOS)
+# Windows installer builds via .github/workflows/desktop-build.yml
+```
 
-# Just look at running processes
-python -m cli.scan --processes-only
+> Because the app is signed ad-hoc (no Apple Developer ID), macOS Gatekeeper
+> blocks the first launch. **Right-click the app → Open** (or System Settings →
+> Privacy & Security → "Open Anyway") once; after that it launches normally.
 
-# Just check installed software and OS settings for known weaknesses
-python -m cli.scan --vuln-only
+**CLI** (no UI needed):
 
-# Or open the desktop app — Files, Processes, and Vulnerabilities tabs
-python -m ui.app
+```bash
+python -m cli.scan --apply ~/Downloads     # scan a folder, act on findings
+python -m cli.scan --processes-only        # just running processes
+python -m cli.scan --vuln-only             # software + OS posture
+python -m cli.scan --everything            # deep scan the whole computer
 ```
 
 When you want fresh definitions — the *only* thing that goes online, and only

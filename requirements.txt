@@ -1,13 +1,17 @@
-# Phase 1 scanner core — all local, no network/telemetry libraries.
-psutil>=5.9          # cross-platform process inspection (Mac + Windows)
+# Oyster engine — runtime dependencies (sidecar/ + core/ + agent/).
+# All local; no networking/telemetry libraries on purpose.
+psutil>=5.9          # cross-platform process inspection (macOS + Windows)
 python-magic>=0.4.27 # content-based file typing (needs libmagic; falls back to extensions)
-customtkinter>=5.2   # modern desktop UI (rounded widgets, light/dark); UI-only, pure Python
-Pillow>=10.0         # UI-only: tints the bundled Lucide PNG icons at runtime
 
 # Notes:
+#  - The desktop UI is an Electron app (see desktop/). It drives this Python
+#    engine as a stdio sidecar — the engine opens no sockets.
 #  - ClamAV is NOT a pip package. Install the engine separately:
-#       macOS:    brew install clamav
-#       Windows:  https://www.clamav.net/downloads  (or: winget install ClamAV.ClamAV)
-#    Then run `freshclam` once to download signature definitions (the ONE
-#    sanctioned online step). The scanner shells out to clamscan/clamd.
-#  - No requests/httpx/urllib3 here on purpose. Core must not open sockets.
+#       macOS:    brew install clamav      (then run `freshclam`)
+#       Windows:  winget install ClamAV.ClamAV   (then run freshclam)
+#  - No requests/httpx/urllib3 here on purpose. Core must not open sockets;
+#    the one loopback connection (Ollama) uses stdlib urllib via agent/netguard.
+#
+# Build-only (not needed to run the engine):
+#   pyinstaller          # bundles the engine for the desktop app
+#   Pillow, cairosvg     # regenerate branding/ icons (branding/_generate.py)
