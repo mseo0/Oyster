@@ -1,12 +1,16 @@
-name: Build Oyster desktop app
+name: Build & release Oyster
 
-# Builds the Electron app (with the PyInstaller engine sidecar bundled) for
-# macOS and Windows. PyInstaller/Electron can't cross-compile, so each OS is
-# built on its own runner. Artifacts are uploaded per-platform.
+# Build the desktop app (Electron + bundled PyInstaller engine) for macOS and
+# Windows, and — when you push a version tag like v0.1.0 — publish a GitHub
+# Release with the .dmg and .exe attached so people can just download them.
+# PyInstaller/Electron can't cross-compile, so each OS builds on its own runner.
 on:
   workflow_dispatch:
   push:
     tags: ["v*"]
+
+permissions:
+  contents: write          # needed to create the GitHub Release
 
 jobs:
   build:
@@ -15,11 +19,9 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            engine_build: "python -m PyInstaller --noconfirm --clean packaging/engine.spec"
             dist: "npm run dist:mac"
             artifact: "desktop/dist/*.dmg"
           - os: windows-latest
-            engine_build: "python -m PyInstaller --noconfirm --clean packaging/engine.spec"
             dist: "npm run dist:win"
             artifact: "desktop/dist/*.exe"
     runs-on: ${{ matrix.os }}
@@ -35,20 +37,40 @@ jobs:
           pip install -r requirements.txt pyinstaller
 
       - name: Build engine sidecar
-        run: ${{ matrix.engine_build }}
+        run: python -m PyInstaller --noconfirm --clean packaging/engine.spec
 
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
 
-      - name: Install + package Electron app
+      - name: Build installer
         working-directory: desktop
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"   # unsigned in CI; sign separately for release
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"   # unsigned; sign separately for a polished release
         run: |
           npm install
           ${{ matrix.dist }}
 
+      # always upload the build as a CI artifact (downloadable from the run)
       - uses: actions/upload-artifact@v4
         with:
           name: oyster-${{ matrix.os }}
           path: ${{ matrix.artifact }}
+
+      # on a version tag, attach the installer to a GitHub Release
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}
+          draft: true                # review/edit notes, then publish
+          generate_release_notes: true
+          body: |
+            ### Install
+            - **macOS** — download the `.dmg`, drag Oyster to Applications.
+              First launch: **right-click → Open** (unsigned app; one-time Gatekeeper allow).
+            - **Windows** — download and run the `.exe`. If SmartScreen warns,
+              **More info → Run anyway** (unsigned installer).
+
+            On first launch Oyster offers to set up its scanning definitions.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
