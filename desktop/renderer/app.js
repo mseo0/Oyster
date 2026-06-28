@@ -1005,9 +1005,9 @@ function setActionsBusy(busy) {
 }
 
 // ---------- live scan timer / throughput / ETA ----------
-let scan = { start: 0, count: 0, total: 0, timer: null, active: false, label: '', canceling: false };
+let scan = { start: 0, count: 0, total: 0, timer: null, active: false, label: '', canceling: false, samples: [], etaS: null };
 function startScanUI(label) {
-  scan = { start: Date.now(), count: 0, total: 0, timer: null, active: true, label, canceling: false };
+  scan = { start: Date.now(), count: 0, total: 0, timer: null, active: true, label, canceling: false, samples: [], etaS: null };
   const bar = $('scanbar');
   bar.classList.remove('hidden');
   // Build the bar ONCE. The spinner + track elements then animate continuously
@@ -1041,12 +1041,30 @@ function fmtEta(s) {
 }
 function paintScanBar() {
   if (!scan.active) return;
-  const sec = (Date.now() - scan.start) / 1000;
-  const rate = sec > 0 ? scan.count / sec : 0;
-  // ETA from the pre-counted total (only available for targeted scans)
+  const now = Date.now();
+  const sec = (now - scan.start) / 1000;
+  // Rate from a recent window, NOT the lifetime average. The walk+hash phase is
+  // fast but ClamAV deep-inspection is slow and stalls the "seen" counter for
+  // seconds at a time; a lifetime average is dominated by the fast early phase
+  // and badly under-estimates. An ~8s window tracks the *current* throughput, so
+  // the estimate rises honestly the moment deep scanning slows things down.
+  scan.samples.push({ t: now, c: scan.count });
+  while (scan.samples.length > 1 && now - scan.samples[0].t > 8000) scan.samples.shift();
+  const head = scan.samples[0];
+  const dt = (now - head.t) / 1000, dc = scan.count - head.c;
+  const lifetime = sec > 0 ? scan.count / sec : 0;
+  // Use the windowed rate once we have a real window; blend toward lifetime when
+  // the window momentarily reads zero (a single in-flight ClamAV batch) so the
+  // ETA doesn't spike to infinity, then collapse, on every batch boundary.
+  let rate = dt >= 1 ? dc / dt : lifetime;
+  if (rate <= 0) rate = lifetime * 0.25;   // mid-batch stall: keep a floor, don't divide by ~0
+  // ETA from the pre-counted total (only available for targeted scans), smoothed
+  // so it counts down steadily instead of jumping around between repaints.
   let eta = '—';
   if (scan.total > 0 && rate > 0 && scan.count < scan.total) {
-    eta = fmtEta((scan.total - scan.count) / rate);
+    const raw = (scan.total - scan.count) / rate;
+    scan.etaS = scan.etaS == null ? raw : scan.etaS * 0.6 + raw * 0.4;
+    eta = fmtEta(scan.etaS);
   } else if (scan.total > 0 && scan.count >= scan.total) { eta = 'finishing…'; }
   const pct = scan.total > 0 ? Math.min(100, (scan.count / scan.total) * 100) : null;
   // update only the dynamic bits — the spinner element is left alone so it keeps

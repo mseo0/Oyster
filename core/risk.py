@@ -49,6 +49,11 @@ class SigClass(str, Enum):
 _HEURISTIC_FRAGMENTS = (
     "heuristics.", "pua.", "broken.", "packer.", "encrypted.",
     "sanesecurity.", "porcupine.", "phishing.heuristics",
+    # Matches from our own bundled YARA rules (reported as "YARA.<rule>") are
+    # broad pattern heuristics, NOT curated malware-family signatures — they fire
+    # on legitimate files (e.g. compiled .dll/.dylib) and must be corroborated
+    # with code-signing before they're worth alarming the user.
+    "yara.",
 )
 
 # Authorities we consider trusted enough that a *generic* hit on a file they
