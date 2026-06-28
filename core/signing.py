@@ -22,6 +22,16 @@ class SignInfo:
     detail: str = ""
 
 
+def verify_safe(path: str | Path) -> SignInfo:
+    """`verify` for a string path that never raises and never blocks forever —
+    returns a 'not checked' result on any error so a risk assessment can fall
+    back gracefully."""
+    try:
+        return verify(Path(path))
+    except Exception as e:
+        return SignInfo(checked=False, signed=False, valid=False, detail=str(e))
+
+
 def verify(path: Path) -> SignInfo:
     try:
         if sys.platform == "darwin":

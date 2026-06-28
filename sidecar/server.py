@@ -260,6 +260,8 @@ class Engine:
         self.scanned_once = True
         return {"findings": findings, "filesSeen": report.files_seen,
                 "filesUnreadable": report.files_unreadable,
+                "filesScanned": report.files_scanned,
+                "risksSuppressed": report.risks_suppressed,
                 "secs": round(time.time() - t0, 1),
                 "canceled": report.canceled}
 
