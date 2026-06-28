@@ -19,10 +19,10 @@ permissions:
 jobs:
   # ---------------------------------------------------------------- macOS ----
   macos:
-    runs-on: macos-latest
+    runs-on: macos-15          # pinned (macos-latest is migrating to macOS 26)
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with: { python-version: "3.12" }
 
       - name: Install Python deps + PyInstaller
@@ -33,7 +33,7 @@ jobs:
       - name: Build engine sidecar
         run: python -m PyInstaller --noconfirm --clean packaging/engine.spec
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with: { node-version: "20" }
 
       - name: Build installer (.dmg)
@@ -44,7 +44,7 @@ jobs:
           npm install
           npm run dist:mac
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: oyster-macos
           path: desktop/dist/*.dmg
@@ -53,8 +53,8 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with: { python-version: "3.12" }
 
       - name: Build engine sidecar
@@ -92,7 +92,7 @@ jobs:
           & desktop/resources/clamav/freshclam.exe --config-file=desktop/resources/clamav/freshclam.conf
           Write-Host "Bundled ClamAV:"; Get-ChildItem desktop/resources/clamav
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with: { node-version: "20" }
 
       - name: Build installer (.exe)
@@ -103,7 +103,7 @@ jobs:
           npm install
           npm run dist:win
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: oyster-windows
           path: desktop/dist/*.exe
@@ -115,7 +115,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
 
