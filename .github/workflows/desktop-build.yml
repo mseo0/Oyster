@@ -1,9 +1,13 @@
 name: Build & release Oyster
 
 # Build the desktop app (Electron + bundled PyInstaller engine) for macOS and
-# Windows, and — when you push a version tag like v0.1.0 — publish a GitHub
-# Release with the .dmg and .exe attached so people can just download them.
-# PyInstaller/Electron can't cross-compile, so each OS builds on its own runner.
+# Windows, then — on a version tag like v0.1.0 — publish ONE GitHub Release with
+# both installers attached. PyInstaller/Electron can't cross-compile, so each OS
+# builds on its own runner; a final job gathers the artifacts and releases once
+# (doing it inside each matrix job races and creates duplicate draft releases).
+#
+# The Windows installer ships ClamAV (binaries + virus signature database) inside
+# it, so Windows users get working detection with no separate ClamAV install.
 on:
   workflow_dispatch:
   push:
@@ -13,21 +17,11 @@ permissions:
   contents: write          # needed to create the GitHub Release
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            dist: "npm run dist:mac"
-            artifact: "desktop/dist/*.dmg"
-          - os: windows-latest
-            dist: "npm run dist:win"
-            artifact: "desktop/dist/*.exe"
-    runs-on: ${{ matrix.os }}
+  # ---------------------------------------------------------------- macOS ----
+  macos:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
 
@@ -42,35 +36,106 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
 
-      - name: Build installer
+      - name: Build installer (.dmg)
         working-directory: desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"   # unsigned; sign separately for a polished release
         run: |
           npm install
-          ${{ matrix.dist }}
+          npm run dist:mac
 
-      # always upload the build as a CI artifact (downloadable from the run)
       - uses: actions/upload-artifact@v4
         with:
-          name: oyster-${{ matrix.os }}
-          path: ${{ matrix.artifact }}
+          name: oyster-macos
+          path: desktop/dist/*.dmg
 
-      # on a version tag, attach the installer to a GitHub Release
-      - name: Publish to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+  # -------------------------------------------------------------- Windows ----
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      - name: Build engine sidecar
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+          python -m PyInstaller --noconfirm --clean packaging/engine.spec
+
+      - name: Bundle ClamAV (latest binaries + virus database)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Resolve the latest ClamAV Windows x64 zip from the GitHub releases API
+          # (so the build never breaks when a new ClamAV version lands).
+          $headers = @{ "User-Agent" = "oyster-ci"; "Authorization" = "Bearer $env:GH_TOKEN" }
+          $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/Cisco-Talos/clamav/releases/latest" -Headers $headers
+          $asset = $rel.assets | Where-Object { $_.name -match 'win\.x64\.zip$' } | Select-Object -First 1
+          if (-not $asset) { throw "no win.x64.zip asset in latest ClamAV release ($($rel.tag_name))" }
+          Write-Host "ClamAV: $($asset.name)"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile clamav.zip -Headers @{ "User-Agent" = "oyster-ci" }
+          Expand-Archive clamav.zip -DestinationPath clamav_x -Force
+
+          $src = (Get-ChildItem -Recurse -Filter clamscan.exe clamav_x | Select-Object -First 1).DirectoryName
+          New-Item -ItemType Directory -Force -Path desktop/resources/clamav/db | Out-Null
+          Copy-Item "$src/*" desktop/resources/clamav/ -Recurse -Force
+
+          # download signatures into the bundled db dir so detection works offline
+          $db = (Resolve-Path desktop/resources/clamav/db).Path
+          Set-Content -Encoding ascii desktop/resources/clamav/freshclam.conf @"
+          DatabaseDirectory $db
+          DatabaseMirror database.clamav.net
+          "@
+          & desktop/resources/clamav/freshclam.exe --config-file=desktop/resources/clamav/freshclam.conf
+          Write-Host "Bundled ClamAV:"; Get-ChildItem desktop/resources/clamav
+
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+
+      - name: Build installer (.exe)
+        working-directory: desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          npm install
+          npm run dist:win
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oyster-windows
+          path: desktop/dist/*.exe
+
+  # -------------------------------------------------- single release job -----
+  release:
+    needs: [macos, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish ONE GitHub Release with both installers
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.artifact }}
-          draft: true                # review/edit notes, then publish
+          files: |
+            artifacts/**/*.dmg
+            artifacts/**/*.exe
+          draft: false                     # auto-publish; edit notes after if you like
           generate_release_notes: true
+          fail_on_unmatched_files: true
           body: |
             ### Install
             - **macOS** — download the `.dmg`, drag Oyster to Applications.
               First launch: **right-click → Open** (unsigned app; one-time Gatekeeper allow).
-            - **Windows** — download and run the `.exe`. If SmartScreen warns,
-              **More info → Run anyway** (unsigned installer).
+            - **Windows** — download and run the `.exe`. ClamAV is bundled, so detection
+              works out of the box. If SmartScreen warns, **More info → Run anyway**.
 
-            On first launch Oyster offers to set up its scanning definitions.
+            On first launch Oyster offers to finish setup (update virus definitions and,
+            optionally, install a local AI model for plain-English explanations).
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

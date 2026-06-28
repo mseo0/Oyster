@@ -462,21 +462,10 @@ class Engine:
                 "modelReady": (self.model in client.installed()) if ok else False}
 
     def setup_run(self, _):
-        import subprocess
         from core.osvdb import OsvDB
         res = {}
-        # 1) ClamAV signature database (needs ClamAV installed)
-        fc = toolpaths.find_tool("freshclam")
-        if toolpaths.find_tool("clamscan") and fc:
-            _emit("progress", "Updating ClamAV virus database…")
-            try:
-                r = subprocess.run([fc], capture_output=True, text=True,
-                                   timeout=900)
-                res["clamav"] = "ok" if r.returncode == 0 else "skipped"
-            except Exception as e:
-                res["clamav"] = f"error: {e}"
-        else:
-            res["clamav"] = "clamav not installed"
+        # 1) ClamAV virus database — update via the bundled or installed freshclam.
+        res["clamav"] = self._setup_clamav()
         # 2) OSV CVE snapshot (only if not present)
         try:
             if OsvDB(self.cfg.osv_db_path).count == 0:
@@ -487,19 +476,94 @@ class Engine:
             res["cve"] = OsvDB(self.cfg.osv_db_path).count
         except Exception as e:
             res["cve"] = f"error: {e}"
-        # 3) local AI model (only if Ollama is running and it's missing)
-        rec = config.recommended_model()
-        client = Ollama(rec)
-        if client.available():
-            if rec not in client.installed():
-                _emit("progress", f"Downloading local AI model {rec} "
-                      "(one-time; a few minutes)…")
-                client.pull(rec)
-            self.model = self._pick_model()
-            res["model"] = self.model
-        else:
-            res["model"] = "ollama not running"
+        # 3) local AI model — install Ollama if needed (Windows), then pull.
+        res["model"] = self._setup_model()
         return res
+
+    def _setup_clamav(self) -> str:
+        """Refresh ClamAV signatures. With a bundled ClamAV (Windows builds) the
+        ship-time database already works, so an update is a nice-to-have; we never
+        report a hard failure that would block setup."""
+        import os
+        import subprocess
+        fc = toolpaths.find_tool("freshclam")
+        if not (toolpaths.find_tool("clamscan") and fc):
+            return "clamav not installed"
+        _emit("progress", "Updating ClamAV virus database…")
+        cmd = [fc]
+        bdir = toolpaths.bundled_clamav_dir()
+        try:
+            if bdir is not None:
+                # The build-time freshclam.conf points at a path that doesn't
+                # exist on the user's machine, so write a runtime one aimed at the
+                # bundled db dir. If that dir is read-only (a locked-down install),
+                # keep the signatures we shipped.
+                db = bdir / "db"
+                if not (db.is_dir() and os.access(db, os.W_OK)):
+                    return "using bundled signatures"
+                self.cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+                conf = self.cfg.db_path.parent / "freshclam.conf"
+                conf.write_text(
+                    f"DatabaseDirectory {db}\nDatabaseMirror database.clamav.net\n")
+                cmd = [fc, f"--config-file={conf}"]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+            return "ok" if r.returncode == 0 else "using bundled signatures"
+        except Exception:
+            return "using bundled signatures"
+
+    def _setup_model(self) -> str:
+        """Make a local AI model available. On Windows, install Ollama (winget)
+        if it's missing, start it, then pull the recommended model."""
+        rec = config.recommended_model()
+        if not Ollama(rec).available():
+            if sys.platform.startswith("win"):
+                if not self._install_ollama_windows():
+                    return "ollama not installed — get it at ollama.com, then re-run setup"
+            else:
+                return "ollama not running — start Ollama, then re-run setup"
+        if not Ollama(rec).available():
+            return "ollama not running"
+        client = Ollama(rec)
+        if rec not in client.installed():
+            _emit("progress", f"Downloading local AI model {rec} "
+                  "(one-time; a few minutes)…")
+            client.pull(rec)
+        self.model = self._pick_model()
+        return self.model
+
+    def _install_ollama_windows(self) -> bool:
+        """Install Ollama via winget and bring its local server up. Best-effort;
+        returns True only once the loopback API answers."""
+        import os
+        import shutil
+        import subprocess
+        _emit("progress", "Installing Ollama (one-time)…")
+        try:
+            subprocess.run(
+                ["winget", "install", "--id", "Ollama.Ollama", "-e", "--silent",
+                 "--accept-package-agreements", "--accept-source-agreements"],
+                capture_output=True, text=True, timeout=1200)
+        except Exception:
+            return False
+        exe = shutil.which("ollama")
+        if not exe:
+            cand = (Path(os.environ.get("LOCALAPPDATA", "")) / "Programs"
+                    / "Ollama" / "ollama.exe")
+            exe = str(cand) if cand.is_file() else None
+        if not exe:
+            return False
+        _emit("progress", "Starting Ollama…")
+        try:
+            subprocess.Popen(
+                [exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception:
+            pass
+        for _ in range(40):                 # wait up to ~40s for the API to answer
+            if Ollama(self.model).available():
+                return True
+            time.sleep(1)
+        return Ollama(self.model).available()
 
 
 def _handle(engine: Engine, req: dict) -> None:

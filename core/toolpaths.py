@@ -41,22 +41,38 @@ def ensure_path() -> None:
         os.environ["PATH"] = os.pathsep.join(add + parts)
 
 
-def bundled_clamav() -> Path | None:
-    """If the app ships its own ClamAV (Windows builds do), return its clamscan.
-    Layout: <resources>/clamav/clamscan(.exe), engine at <resources>/engine/...
-    so it's two levels up from the frozen engine binary."""
+def bundled_clamav_dir() -> Path | None:
+    """The directory of the app's own ClamAV, if it ships one (Windows builds do).
+    Layout: <resources>/clamav/ with clamscan/freshclam + db/, engine at
+    <resources>/engine/..., so it's two levels up from the frozen engine binary."""
     if not getattr(sys, "frozen", False):
         return None
-    exe = "clamscan.exe" if sys.platform.startswith("win") else "clamscan"
     try:
-        cand = Path(sys.executable).resolve().parents[2] / "clamav" / exe
-        return cand if cand.is_file() else None
+        d = Path(sys.executable).resolve().parents[2] / "clamav"
+        return d if d.is_dir() else None
     except (IndexError, OSError):
         return None
 
 
+def bundled_clamav() -> Path | None:
+    """If the app ships its own ClamAV, return its clamscan binary."""
+    d = bundled_clamav_dir()
+    if d is None:
+        return None
+    exe = "clamscan.exe" if sys.platform.startswith("win") else "clamscan"
+    cand = d / exe
+    return cand if cand.is_file() else None
+
+
 def find_tool(name: str) -> str | None:
-    """Absolute path to `name` from PATH or a known location, else None."""
+    """Absolute path to `name` from the bundled ClamAV, PATH, or a known
+    location, else None. The bundled copy is checked first so a self-contained
+    Windows install works even when ClamAV isn't installed system-wide."""
+    bdir = bundled_clamav_dir()
+    if bdir is not None:
+        cand = bdir / (name + (".exe" if sys.platform.startswith("win") else ""))
+        if cand.is_file():
+            return str(cand)
     found = shutil.which(name)
     if found:
         return found
@@ -72,16 +88,19 @@ def find_clamav_db() -> str | None:
     """Return a path to a ClamAV database directory that contains .cvd/.cld files,
     or None if only the system default should be used (clamscan finds it itself)."""
     candidates: list[Path] = []
+    bdir = bundled_clamav_dir()          # the app's own ClamAV (Windows builds)
+    if bdir is not None:
+        candidates += [bdir / "db", bdir / "database", bdir]
     if sys.platform.startswith("win"):
         local = Path(os.environ.get("LOCALAPPDATA", "")) / "ClamAV" / "db"
         pf = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "ClamAV" / "database"
-        candidates = [local, pf]
+        candidates += [local, pf]
     elif sys.platform == "darwin":
-        candidates = [Path("/usr/local/var/lib/clamav"),
-                      Path("/opt/homebrew/var/lib/clamav"),
-                      Path.home() / ".clamav"]
+        candidates += [Path("/usr/local/var/lib/clamav"),
+                       Path("/opt/homebrew/var/lib/clamav"),
+                       Path.home() / ".clamav"]
     else:
-        candidates = [Path("/var/lib/clamav"), Path("/var/lib/clamav/db")]
+        candidates += [Path("/var/lib/clamav"), Path("/var/lib/clamav/db")]
     for d in candidates:
         if d.is_dir() and any(d.glob("*.cvd")) or (d.is_dir() and any(d.glob("*.cld"))):
             return str(d)
