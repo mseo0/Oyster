@@ -20,9 +20,11 @@ from .walker import walk
 ProgressFn = Callable[[str], None]
 
 # How many files to hand ClamAV per invocation. ClamAV reloads its whole
-# signature DB on every launch, so we batch: one DB load covers a few hundred
-# files instead of one DB load per file (which made full scans appear to hang).
-CLAM_BATCH = 150
+# signature DB (~250 MB, several seconds) on every launch, so we batch: one DB
+# load covers many files instead of one load per file. A larger batch means far
+# fewer reloads — the dominant cost of a full scan — and we stream per-file
+# results so a big batch still shows continuous progress instead of freezing.
+CLAM_BATCH = 500
 
 
 def _short(p: Path, maxlen: int = 70) -> str:
@@ -48,6 +50,7 @@ class ScanReport:
     files_hashed: int = 0
     files_scanned: int = 0
     files_unreadable: int = 0   # couldn't be read (perms) -> coverage gap
+    files_cached: int = 0       # unchanged + already-clean -> skipped clamscan
     findings: list[Finding] = field(default_factory=list)
     engine_available: bool = False
     process_threats: int = 0
@@ -62,11 +65,15 @@ class Scanner:
         self.cache = HashCache(cfg.db_path)
         self.store = Store(cfg.db_path)
         self.engine = ClamEngine(extra_yara_dir=rules_dir)
+        self._engine_ver = ""   # set per-scan from the engine fingerprint
 
     def scan(self, progress: ProgressFn = lambda s: None,
              vuln: bool = True, cancel=lambda: False) -> ScanReport:
         report = ScanReport(engine_available=self.engine.available)
         progress(self.engine.status())
+        # Fingerprint the engine once; cached "clean" verdicts are keyed on it so
+        # they auto-invalidate when the virus DB or rules change.
+        self._engine_ver = self.engine.signature_version()
         roots = ", ".join(str(r) for r in self.cfg.roots)
         progress(f"Walking {roots} …")
 
@@ -116,9 +123,14 @@ class Scanner:
             #    Buffer it; ClamAV runs on the whole batch at once below.
             if (cand.interesting and self.engine.available
                     and cand.size <= config.MAX_CONTENT_SCAN_BYTES):
+                # Skip the costly clamscan pass if this exact content was already
+                # found clean under the current engine fingerprint.
+                if self.cache.is_clean(digest, self._engine_ver):
+                    report.files_scanned += 1
+                    report.files_cached += 1
+                    continue
                 pending.append((cand.path, digest))
                 if len(pending) >= CLAM_BATCH:
-                    progress(f"Inspecting {len(pending)} files with ClamAV…")
                     self._flush_batch(report, pending, progress)
                     last = time.monotonic()
 
@@ -135,6 +147,9 @@ class Scanner:
 
         tail = (f" · {report.files_unreadable:,} unreadable (grant Full Disk "
                 "Access to cover them)") if report.files_unreadable else ""
+        if report.files_cached:
+            tail += (f" · {report.files_cached:,} unchanged file(s) skipped via "
+                     "cache")
         if report.risks_suppressed:
             tail += (f" · {report.risks_suppressed:,} low-confidence heuristic "
                      "hit(s) on signed files filtered out")
@@ -147,13 +162,42 @@ class Scanner:
         """Inspect one buffered batch of files with a single ClamAV run, then
         score each hit into a reliably-ranked risk (named family vs. heuristic,
         cross-checked against code-signing) so legitimate signed program files
-        aren't reported as malware."""
+        aren't reported as malware.
+
+        clamscan streams a verdict per file; we forward each one as live
+        progress so a large batch never looks frozen while it inspects."""
         if not pending:
             return
-        report.files_scanned += len(pending)
+        total = len(pending)
         paths = [p for p, _ in pending]
         digests = {str(p): d for p, d in pending}
-        hits = self.engine.scan_files(paths)
+        progress(f"Inspecting {total:,} files with ClamAV (loading signatures…)")
+
+        # Stream per-file progress. The DB load up front produces no output for a
+        # few seconds; after that each verdict advances the "deep" counter so the
+        # status line moves continuously instead of stalling on one message.
+        base_seen, base_scanned = report.files_seen, report.files_scanned
+        state = {"done": 0, "last": 0.0}
+        clean: list[str] = []   # sha256s that came back OK -> cache to skip next time
+
+        def on_file(path: str, sig: str | None) -> None:
+            state["done"] += 1
+            if sig is None:                       # clamscan reported this file OK
+                d = digests.get(path)
+                if d:
+                    clean.append(d)
+            now = time.monotonic()
+            if now - state["last"] >= 0.1:
+                state["last"] = now
+                progress(
+                    f"Scanning · {base_seen:,} seen · {report.files_hashed:,} "
+                    f"hashed · {base_scanned + state['done']:,} deep · "
+                    f"{_short(Path(path))}")
+
+        hits = self.engine.scan_files(paths, on_file=on_file)
+        report.files_scanned = base_scanned + total
+        # Remember clean content so an unchanged file skips clamscan next scan.
+        self.cache.mark_clean(clean, self._engine_ver)
         pending.clear()
         for path, signature in hits.items():
             a = risk.assess(path, signature)

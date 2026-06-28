@@ -261,6 +261,7 @@ class Engine:
         return {"findings": findings, "filesSeen": report.files_seen,
                 "filesUnreadable": report.files_unreadable,
                 "filesScanned": report.files_scanned,
+                "filesCached": report.files_cached,
                 "risksSuppressed": report.risks_suppressed,
                 "secs": round(time.time() - t0, 1),
                 "canceled": report.canceled}

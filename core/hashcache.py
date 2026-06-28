@@ -39,6 +39,16 @@ class HashCache:
             CREATE TABLE IF NOT EXISTS known_bad (
                 sha256 TEXT PRIMARY KEY, label TEXT
             );
+            -- Remembers content (by sha256) that the engine already scanned and
+            -- found clean, tagged with the engine fingerprint that produced the
+            -- verdict (clamscan + virus-DB version + rules + scan logic). On
+            -- re-scan, an unchanged file whose verdict is still valid for the
+            -- current fingerprint skips the costly clamscan pass entirely. A DB
+            -- or rules update changes the fingerprint, so stale verdicts are
+            -- ignored and the file is re-inspected — no false sense of safety.
+            CREATE TABLE IF NOT EXISTS clean_scans (
+                sha256 TEXT PRIMARY KEY, engine_ver TEXT
+            );
             """
         )
         self.db.commit()
@@ -84,6 +94,27 @@ class HashCache:
                 self._buffer)
             self.db.commit()
             self._buffer.clear()
+
+    def is_clean(self, sha256: str, engine_ver: str) -> bool:
+        """True if this exact content was already scanned clean by the current
+        engine fingerprint — so we can skip the expensive clamscan pass."""
+        row = self.db.execute(
+            "SELECT 1 FROM clean_scans WHERE sha256=? AND engine_ver=?",
+            (sha256, engine_ver),
+        ).fetchone()
+        return row is not None
+
+    def mark_clean(self, shas: list[str], engine_ver: str) -> None:
+        """Record content (by sha256) the engine just found clean. INSERT OR
+        REPLACE keeps one row per content, so the table grows with distinct
+        files, not with every re-scan or DB update."""
+        if not shas:
+            return
+        self.db.executemany(
+            "INSERT OR REPLACE INTO clean_scans VALUES (?,?)",
+            [(s, engine_ver) for s in shas],
+        )
+        self.db.commit()
 
     def known_bad_label(self, sha256: str) -> str | None:
         row = self.db.execute(
