@@ -1,7 +1,7 @@
 {
   "name": "oyster",
   "productName": "Oyster",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Oyster — local agentic antivirus that never phones home",
   "main": "electron/main.js",
   "scripts": {
@@ -16,14 +16,25 @@
   "build": {
     "appId": "com.oyster.antivirus",
     "productName": "Oyster",
-    "files": ["electron/**", "renderer/**"],
+    "files": [
+      "electron/**",
+      "renderer/**"
+    ],
     "extraResources": [
-      { "from": "../dist/oyster-engine", "to": "engine/oyster-engine" },
-      { "from": "resources/clamav", "to": "clamav" }
+      {
+        "from": "../dist/oyster-engine",
+        "to": "engine/oyster-engine"
+      },
+      {
+        "from": "resources/clamav",
+        "to": "clamav"
+      }
     ],
     "mac": {
       "category": "public.app-category.utilities",
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "icon": "../branding/Oyster.icns",
       "artifactName": "${productName}-${version}-${arch}.${ext}",
       "identity": null,
@@ -33,13 +44,27 @@
     "dmg": {
       "title": "Install Oyster",
       "contents": [
-        { "x": 140, "y": 200, "type": "file" },
-        { "x": 400, "y": 200, "type": "link", "path": "/Applications" }
+        {
+          "x": 140,
+          "y": 200,
+          "type": "file"
+        },
+        {
+          "x": 400,
+          "y": 200,
+          "type": "link",
+          "path": "/Applications"
+        }
       ],
-      "window": { "width": 540, "height": 380 }
+      "window": {
+        "width": 540,
+        "height": 380
+      }
     },
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "icon": "../branding/oyster.ico",
       "artifactName": "${productName}-Setup-${version}.${ext}"
     },
