@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import inventory, posture
+from . import inventory, portscan, posture
 from .findings import Finding, FindingKind, Severity
 from .osvdb import OsvDB
 
@@ -53,7 +53,10 @@ def audit(osv_db_path: Path) -> list[Finding]:
                      "installed": pkg.version},
                 ))
 
-    # --- 2) OS security posture ------------------------------------------
+    # --- 2) network exposure: listening / open ports ---------------------
+    findings.extend(portscan.audit())
+
+    # --- 3) OS security posture ------------------------------------------
     for chk in posture.audit():
         if not chk.ok:
             findings.append(Finding(

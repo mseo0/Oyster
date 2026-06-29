@@ -74,6 +74,11 @@ class Scanner:
         # Fingerprint the engine once; cached "clean" verdicts are keyed on it so
         # they auto-invalidate when the virus DB or rules change.
         self._engine_ver = self.engine.signature_version()
+        # If no local known-bad hash set is loaded, a file's hash is only useful
+        # for the content-scan cache — so files we won't content-scan don't need
+        # to be hashed at all. This skips reading the full bytes of the millions
+        # of media/log/doc files on a disk, the dominant cost of a full scan.
+        has_known_bad = self.cache.has_known_bad()
         roots = ", ".join(str(r) for r in self.cfg.roots)
         progress(f"Walking {roots} …")
 
@@ -99,6 +104,15 @@ class Scanner:
                     f"{report.files_hashed:,} hashed · "
                     f"{report.files_scanned:,} deep · {_short(cand.path)}")
 
+            # Will ClamAV actually look inside this file? (interesting type,
+            # engine present, not oversized.) That's the only case besides a
+            # known-bad lookup that needs the file's hash.
+            clam_candidate = (cand.interesting and self.engine.available
+                              and cand.size <= config.MAX_CONTENT_SCAN_BYTES)
+            if not clam_candidate and not has_known_bad:
+                # Nothing uses this file's hash, so don't pay to read it.
+                continue
+
             digest, _changed = self.cache.hash_for(
                 cand.path, cand.size, cand.mtime)
             if not digest:
@@ -109,20 +123,20 @@ class Scanner:
             report.files_hashed += 1
 
             # 1) cheapest, strongest signal: local known-bad hash
-            label = self.cache.known_bad_label(digest)
-            if label:
-                self._record(report, Finding(
-                    FindingKind.FILE_MALWARE, Severity.CRITICAL,
-                    str(cand.path), f"known-bad-hash:{label}",
-                    "matched local known-bad hash set",
-                    {"sha256": digest},
-                ))
-                continue
+            if has_known_bad:
+                label = self.cache.known_bad_label(digest)
+                if label:
+                    self._record(report, Finding(
+                        FindingKind.FILE_MALWARE, Severity.CRITICAL,
+                        str(cand.path), f"known-bad-hash:{label}",
+                        "matched local known-bad hash set",
+                        {"sha256": digest},
+                    ))
+                    continue
 
             # 2) heavier engine pass, only for interesting + sane-sized files.
             #    Buffer it; ClamAV runs on the whole batch at once below.
-            if (cand.interesting and self.engine.available
-                    and cand.size <= config.MAX_CONTENT_SCAN_BYTES):
+            if clam_candidate:
                 # Skip the costly clamscan pass if this exact content was already
                 # found clean under the current engine fingerprint.
                 if self.cache.is_clean(digest, self._engine_ver):

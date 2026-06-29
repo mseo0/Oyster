@@ -139,6 +139,12 @@ ipcMain.handle('open-fda', () => {
 ipcMain.handle('set-theme', (_e, mode) => { nativeTheme.themeSource = mode; });
 // reveal a file in Finder/Explorer so the user can review it
 ipcMain.handle('reveal', (_e, p) => { try { shell.showItemInFolder(p); } catch {} });
+// open a folder directly in Finder/Explorer (e.g. the quarantine vault)
+ipcMain.handle('open-path', (_e, p) => shell.openPath(p));
+// open a web source (AI chat online mode) in the default browser — http(s) only
+ipcMain.handle('open-external', (_e, url) => {
+  try { if (/^https?:\/\//i.test(url)) return shell.openExternal(url); } catch {}
+});
 // custom window controls (used by the Windows title bar)
 ipcMain.handle('win-action', (_e, action) => {
   if (!win) return false;

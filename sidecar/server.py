@@ -26,7 +26,7 @@ from core import (config, organize, posture, preflight, processes,  # noqa: E402
 from core.findings import FindingKind, Store  # noqa: E402
 from core.quarantine import Quarantine  # noqa: E402
 from core.scanner import Scanner, count_candidates  # noqa: E402
-from agent import triage  # noqa: E402
+from agent import triage, websearch  # noqa: E402
 from agent.ollama_client import Ollama  # noqa: E402
 
 FILE_KINDS = (FindingKind.FILE_MALWARE, FindingKind.FILE_SUSPICIOUS)
@@ -132,8 +132,29 @@ def _finding_dict(f) -> dict:
         "severity": f.severity.value, "kind": f.kind.value, "target": f.target,
         "name": p.name or f.target, "dir": str(p.parent), "rule": f.rule,
         "detail": f.detail, "evidence": ev, "source": source,
+        # how much the risk engine trusts this hit ("high"/"medium"/"low") — the
+        # UI offers a local-AI second opinion on the low/medium ones.
+        "confidence": str((f.evidence or {}).get("confidence", "")),
         "ai": ai, "action": action,
     }
+
+
+def _file_facts(f: dict) -> str:
+    """The metadata block both the file Q&A and the second-opinion consult feed
+    to the local model. Deliberately metadata-only — never the file's bytes — so
+    these stay fully offline, no-egress features."""
+    ev = f.get("evidence") or {}
+    return (
+        f"File name: {f.get('name', '?')}\n"
+        f"Location: {f.get('dir') or f.get('path') or '?'}\n"
+        f"What the scanner matched: {f.get('rule', '?')}\n"
+        f"Severity: {f.get('severity', '?')}\n"
+        f"Kind of finding: {f.get('kind', '?')}\n"
+        f"Where it came from: {f.get('source', '?')}\n"
+        f"Extra details: {f.get('detail') or '(none)'}\n"
+        + (f"Evidence: {', '.join(f'{k}={v}' for k, v in ev.items())}\n"
+           if ev else "")
+    )
 
 
 def _proc_dict(t) -> dict:
@@ -297,6 +318,37 @@ class Engine:
                               detail=f"qid={qid}", reversible=True)
         return {"qid": qid}
 
+    def quarantine_info(self, _):
+        """List the reversible vault's contents + its folder path, so the UI can
+        show what's held and offer to open the folder or empty it."""
+        items = []
+        total = 0
+        for qid, e in self.quar.list().items():
+            sz = int(e.get("size") or 0)
+            total += sz
+            items.append({"qid": qid, "original": e.get("original", ""),
+                          "name": Path(e.get("original", "")).name or qid,
+                          "reason": e.get("reason", ""), "ts": e.get("ts", 0),
+                          "size": sz})
+        items.sort(key=lambda i: i.get("ts", 0), reverse=True)
+        return {"dir": str(self.quar.vault), "count": len(items),
+                "bytes": total, "items": items}
+
+    def quarantine_empty(self, _):
+        """Permanently erase everything in the vault (empties the 'trash')."""
+        res = self.quar.empty()
+        self.store.log_action(
+            "quarantine_empty", str(self.quar.vault), True,
+            detail=f"removed {res['removed']} item(s), freed {res['bytes']} bytes",
+            reversible=False)
+        return res
+
+    def quarantine_restore(self, params):
+        """Put one quarantined file back where it came from."""
+        original = self.quar.restore(params["qid"])
+        self.store.log_action("restore", str(original), True, reversible=False)
+        return {"ok": True, "original": str(original)}
+
     def mark_safe(self, params):
         self.store.log_action("mark_safe", params["target"], True,
                               reversible=False)
@@ -312,6 +364,17 @@ class Engine:
         self.store.log_action("kill", f"pid:{params['pid']}", True, reversible=False)
         return {"ok": True}
 
+    def close_port(self, params):
+        """Close an open/listening port by stopping the process that holds it.
+        Reuses the protected-process guard, so core OS services are refused."""
+        pid = int(params["pid"])
+        name = params.get("name", "")
+        processes.terminate(pid, name)
+        self.store.log_action(
+            "close_port", f"pid:{pid}:{name}", True,
+            detail="stopped the process listening on a port", reversible=False)
+        return {"ok": True}
+
     def summary(self, _):
         return {"text": triage.summarize_session(
             self.store.session_summary_data(), self.model),
@@ -324,38 +387,106 @@ class Engine:
         if not q:
             return {"text": "Ask a question about this file above."}
         f = params.get("file") or {}
-        ev = f.get("evidence") or {}
-        context = (
-            f"File name: {f.get('name', '?')}\n"
-            f"Location: {f.get('dir') or f.get('path') or '?'}\n"
-            f"What the scanner matched: {f.get('rule', '?')}\n"
-            f"Severity: {f.get('severity', '?')}\n"
-            f"Kind of finding: {f.get('kind', '?')}\n"
-            f"Where it came from: {f.get('source', '?')}\n"
-            f"Extra details: {f.get('detail') or '(none)'}\n"
-            + (f"Evidence: {', '.join(f'{k}={v}' for k, v in ev.items())}\n"
-               if ev else "")
-        )
+        online = bool(params.get("online"))
+        context = _file_facts(f)
+        offline_rule = (
+            " Be honest when something is uncertain. If they ask whether to "
+            "delete it, remember Oyster never erases files — it moves them to a "
+            "safe place you can undo.")
         system = (
             "You are a friendly helper inside a local, offline antivirus, talking "
             "to someone who is NOT good with computers. Answer their question "
             "about this one file using ONLY the facts given — you cannot see the "
             "file's actual contents. Use short, plain, everyday language and avoid "
-            "technical jargon. Be honest when something is uncertain. If they ask "
-            "whether to delete it, remember Oyster never erases files — it moves "
-            "them to a safe place you can undo."
+            "technical jargon." + offline_rule
         )
         client = Ollama(self.model)
         if not client.available():
             return {"text": "The local AI helper isn't running right now, so I "
                     "can't answer extra questions. The explanation above still "
                     "applies, and you can turn the AI on from first-run setup."}
+        # Opt-in online mode: pull a few public search snippets for the model to
+        # ground its answer on. Only the query leaves the machine (never bytes),
+        # and only to the sanctioned search host (see agent/websearch.py).
+        web_ctx, sources = "", []
+        if online:
+            query = self._web_query(q, f)
+            web_ctx, sources = websearch.context_block(query)
+            if web_ctx:
+                system = (
+                    "You are a friendly helper inside a local antivirus, talking "
+                    "to someone who is NOT good with computers. Answer their "
+                    "question about this one file in short, plain language. You "
+                    "have two things: facts the scanner gathered, and a few WEB "
+                    "SEARCH RESULTS about this kind of file/name. Use the web "
+                    "results to add context (e.g. what a name is known for, "
+                    "whether it's a known good app or a known threat), but say "
+                    "plainly when something is uncertain and don't overclaim."
+                    + offline_rule)
+        prompt = f"Facts about the file:\n{context}\n"
+        if web_ctx:
+            prompt += f"\nWeb search results:\n{web_ctx}\n"
+        prompt += f"\nQuestion: {q}"
         try:
-            return {"text": client.generate(
-                prompt=f"Facts about the file:\n{context}\nQuestion: {q}",
-                system=system)}
+            return {"text": client.generate(prompt=prompt, system=system),
+                    "online": bool(web_ctx), "sources": sources}
         except Exception as e:
             return {"text": f"(couldn't reach the local AI model: {e})"}
+
+    @staticmethod
+    def _web_query(question: str, f: dict) -> str:
+        """Build a focused search query from the file's identity + the question,
+        so the snippets are about THIS file/name rather than generic noise."""
+        ev = f.get("evidence") or {}
+        bits = [f.get("name") or "", ev.get("signature") or f.get("rule") or ""]
+        # a file hash is the single best disambiguator when we have one
+        sha = ev.get("sha256") or ""
+        if sha:
+            bits.append(sha[:16])
+        bits.append(question)
+        return " ".join(b for b in bits if b).strip()
+
+    def second_opinion(self, params):
+        """A local-AI second opinion on a LOW-confidence finding — the generic /
+        heuristic hits where the deterministic engine is unsure. Weighs the
+        metadata (signature class, code-signing, downloaded-vs-made-here) the same
+        way a human analyst would and returns a calm, structured verdict.
+
+        Uses only metadata, never the file's bytes, so it stays fully offline and
+        keeps Oyster's no-egress promise."""
+        f = params.get("file") or {}
+        system = (
+            "You are a careful malware-analysis assistant inside a LOCAL, offline "
+            "antivirus, giving a second opinion on a file the scanner matched with "
+            "LOW confidence — i.e. a generic/heuristic pattern, NOT a named virus. "
+            "Decide how worried a non-technical person should be. Weigh these the "
+            "way an analyst would: a file VALIDLY signed by a trusted vendor "
+            "(Apple, Microsoft, a Developer ID) is strong evidence it is "
+            "legitimate; a generic match on a file made on this computer is usually "
+            "a false positive; an unsigned file that was downloaded deserves more "
+            "caution. You CANNOT see the file's contents — judge only from the "
+            "facts. Reply with ONLY a JSON object: {\"verdict\": one of \"likely "
+            "safe\", \"worth a closer look\", \"likely harmful\"; \"why\": one or "
+            "two plain-English sentences a normal person understands; "
+            "\"suggestion\": a short recommended next step}."
+        )
+        obj = self._llm_json(system, f"File facts:\n{_file_facts(f)}")
+        if not obj:
+            return {"available": False,
+                    "text": "The local AI helper isn't running, so a second "
+                    "opinion isn't available right now. The explanation above "
+                    "still applies."}
+        verdict = str(obj.get("verdict", "")).strip().lower()
+        # normalise whatever the model returns onto our three buckets
+        if "harm" in verdict or "malic" in verdict or "danger" in verdict:
+            verdict = "likely harmful"
+        elif "closer" in verdict or "review" in verdict or "caution" in verdict:
+            verdict = "worth a closer look"
+        else:
+            verdict = "likely safe"
+        return {"available": True, "verdict": verdict,
+                "why": str(obj.get("why", "")).strip(),
+                "suggestion": str(obj.get("suggestion", "")).strip()}
 
     # --- local LLM helpers -------------------------------------------
     def _llm_json(self, system: str, prompt: str) -> dict | None:

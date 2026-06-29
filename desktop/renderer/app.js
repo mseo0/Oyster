@@ -33,6 +33,7 @@ const NAV = [
   { key: 'Vulnerabilities', icon: 'shield', sub: 'Installed software & OS settings vs. offline CVE data.', sec: 'scan' },
   { key: 'Cleanup', icon: 'broom', sub: 'Find junk, duplicates & clutter — organize with one click.', sec: 'tools' },
   { key: 'Applications', icon: 'apps', sub: 'Uninstall apps and clear the files they leave behind.', sec: 'tools' },
+  { key: 'Quarantine', icon: 'trash', sub: 'Files moved to the reversible vault — restore, open, or empty.', sec: 'tools' },
   { key: 'AI Summary', icon: 'spark', sub: 'A plain-English read-out, written locally just now.', sec: 'report' },
 ];
 
@@ -42,7 +43,10 @@ const S = {
   sel: { Files: null, Processes: null, Vulnerabilities: null },
   report: null, summary: '', busy: false, scanned: false, downloadedOnly: true,
   organizeTarget: '~/Downloads', organize: null, procTotal: null, apps: null,
-  findFilter: 'all', appBusy: null,
+  findFilter: 'all', appBusy: null, quar: null, aiOnline: false, aiOnlineWarned: false,
+  // multi-select: a Set of the selected finding/process OBJECTS per list (object
+  // refs, not indices, so filtering/sorting can't desync the checkboxes).
+  checked: { Files: new Set(), Processes: new Set(), Vulnerabilities: new Set() },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -226,6 +230,7 @@ function showPage(key) {
   if (key === 'AI Summary') renderSummary();
   else if (key === 'Cleanup') renderOrganize();
   else if (key === 'Applications') renderApplications();
+  else if (key === 'Quarantine') renderQuarantine();
   else renderScan();
 }
 
@@ -239,6 +244,7 @@ function renderScan() {
         <div class="listcard panel">
           <div class="list-head"><span class="t">${listLabel()}</span><span class="r">sorted by severity</span></div>
           ${S.page === 'Files' ? `<div class="find-tabs" id="find-tabs">${findingTabsHtml()}</div>` : ''}
+          <div class="bulkbar" id="bulkbar"></div>
           <div class="list-body" id="list"></div>
         </div>
       </div>
@@ -337,25 +343,65 @@ function renderRows() {
   if (S.page === 'Files' && S.findFilter !== 'all') rows = rows.filter(([o]) => findingTag(o) === S.findFilter);
   list.innerHTML = rows.map(([o, i]) => rowHtml(o, i)).join('')
     || `<div class="empty">No findings in this category.</div>`;
+  renderBulkBar();
+}
+
+// The currently-VISIBLE rows (respects the Files act/review/safe filter), so
+// "Select all" only ever picks what the user can actually see.
+function visibleItems() {
+  let rows = S.data[S.page];
+  if (S.page === 'Files' && S.findFilter !== 'all') rows = rows.filter((o) => findingTag(o) === S.findFilter);
+  return rows;
+}
+// Bulk-action toolbar: appears once one or more rows are checked. The available
+// actions depend on the list (quarantine files, suspend/kill processes, ignore
+// vulns). Protected/resolved items are skipped by the handlers themselves.
+function bulkActionsFor(page) {
+  if (page === 'Files') return [
+    ['bulk-quarantine', 'danger', 'Quarantine selected'],
+    ['bulk-marksafe', 'ghost', 'Mark safe']];
+  if (page === 'Processes') return [
+    ['bulk-suspend', 'success', 'Suspend selected'],
+    ['bulk-kill', 'danger', 'Kill selected']];
+  return [['bulk-ignore', 'ghost', 'Ignore selected']];
+}
+function renderBulkBar() {
+  const bar = $('bulkbar'); if (!bar) return;
+  const set = S.checked[S.page];
+  const n = set.size;
+  if (!n) { bar.classList.remove('show'); bar.innerHTML = ''; return; }
+  bar.classList.add('show');
+  const vis = visibleItems().length;
+  const acts = bulkActionsFor(S.page)
+    .map(([a, k, label]) => `<button class="btn ${k} sm" data-action="${a}">${label}</button>`).join('');
+  bar.innerHTML = `<span class="bulk-n">${n} selected</span>
+    <button class="btn ghost sm" data-action="check-all">${n >= vis ? 'Clear all' : 'Select all (' + vis + ')'}</button>
+    <span class="bulk-sp"></span>${acts}`;
+}
+function checkbox(o, i) {
+  const on = S.checked[S.page].has(o);
+  return `<span class="rowcheck${on ? ' on' : ''}" data-action="check" data-idx="${i}"
+    role="checkbox" aria-checked="${on}" title="Select for a bulk action">${on ? '✓' : ''}</span>`;
 }
 function rowHtml(o, i) {
   const sel = S.sel[S.page] === o ? ' sel' : '';
   if (S.page === 'Processes') {
     const c = procColor(o.score);
     return `<button class="row${sel}" data-action="select" data-idx="${i}">
-      <span class="sq" style="background:${tint(c, 0.16)};color:${c}">${o.score}</span>
+      ${checkbox(o, i)}<span class="sq" style="background:${tint(c, 0.16)};color:${c}">${o.score}</span>
       <span class="body"><span class="name">${esc(o.name)}<span class="pid">pid ${o.pid}</span>${o.protected ? '<span class="tag">PROTECTED</span>' : ''}</span>
       <span class="meta">${esc(o.reasons.join('; ') || '—')}</span></span></button>`;
   }
   const c = SEV[o.severity] || SEV.info;
-  const title = S.page === 'Files' ? o.name : o.rule;
+  const title = S.page === 'Files' ? o.name : vulnTitle(o);
   const meta = S.page === 'Files' ? `${esc(o.dir)} · ${esc(o.rule)}` : `${esc(o.target)} — ${esc(o.detail || o.rule)}`;
   const done = o.resolved ? ' resolved' : '';
+  const RESLABEL = { safe: 'SAFE', quarantined: 'QUAR', ignored: 'IGNORED' };
   const chip = o.resolved
-    ? `<span class="chip" style="background:${tint('#17A98C', 0.16)};color:#17A98C">${o.resolved === 'safe' ? 'SAFE' : 'QUAR'}</span>`
+    ? `<span class="chip" style="background:${tint('#17A98C', 0.16)};color:#17A98C">${RESLABEL[o.resolved] || 'DONE'}</span>`
     : `<span class="chip" style="background:${tint(c, 0.16)};color:${c}">${sevLabel(o.severity)}</span>`;
   return `<button class="row${sel}${done}" data-action="select" data-idx="${i}">
-    <span class="bar" style="background:${o.resolved ? '#17A98C' : c}"></span>
+    ${checkbox(o, i)}<span class="bar" style="background:${o.resolved ? '#17A98C' : c}"></span>
     <span class="body"><span class="name">${esc(title)}</span><span class="meta">${meta}</span></span>
     ${chip}</button>`;
 }
@@ -370,11 +416,64 @@ function aiBox(text, action, color) {
   return `<div class="ai-box"><div class="h">${ic('spark', 14)} Local AI triage</div>
     <p>${esc(text)}</p>${action ? `<span class="act" style="background:${tint(color, 0.16)};color:${color}">→ ${action}</span>` : ''}</div>`;
 }
+// The off-by-default "Online" switch for the AI chat. When ON, the local model
+// is allowed to consult a few public web-search snippets for context. OFF keeps
+// Oyster fully offline — its default and the privacy promise.
+function onlineToggle() {
+  const on = S.aiOnline;
+  return `<button class="online-toggle${on ? ' on' : ''}" data-action="toggle-online"
+      title="${on ? 'Online: the AI may look things up on the web (only your question leaves the machine).'
+                  : 'Offline: nothing leaves your computer. Click to let the AI search the web for context.'}">
+      <span class="dot"></span>${on ? 'Online' : 'Offline'}</button>`;
+}
 function kvTable(pairs) {
   return `<div class="kv">${pairs.map(([k, v]) => `<div class="r"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join('')}</div>`;
 }
 const ACT_COLOR = { QUARANTINE: '#E5484D', SUSPEND: '#17A98C', KILL: '#E5484D',
   ASK_USER: '#E5B003', REVIEW: '#E5B003', IGNORE: '#8E938A', OK: '#17A98C' };
+// Executable actions for a vulnerability finding, chosen by its type: stop the
+// program behind an open port, or copy the command that fixes a CVE / posture gap.
+function vulnActions(f) {
+  const ev = f.evidence || {};
+  // Open listening port → let the user stop the program holding it (closing it).
+  if ((f.rule || '').startsWith('open-port') || ev.port) {
+    const exe = ev.exe || '';
+    return `<div class="ins-actions" style="margin-top:20px">
+        <button class="btn danger" data-action="close-port">Stop the program</button>
+        ${exe ? `<button class="btn ghost" data-action="reveal" data-path="${esc(exe)}">Reveal program</button>` : ''}
+      </div>
+      <div class="note-sm">Stops the program listening on port ${esc(ev.port || '')} — which closes it. Protected system processes are never stopped; re-audit to confirm.</div>`;
+  }
+  // OS posture problem → the one-line command that turns the protection back on.
+  if ((f.target || '').startsWith('posture:') && f.severity !== 'info') {
+    return `<button class="btn ghost" data-action="copyfix" style="width:100%;height:40px;margin-top:20px">Copy fix command</button>`;
+  }
+  // Known-CVE / package advisory → the upgrade command.
+  if (ev.package || ev.ecosystem) {
+    return `<button class="btn ghost" data-action="copyfix" style="width:100%;height:40px;margin-top:20px">Copy upgrade command</button>`;
+  }
+  return '';
+}
+// Title/subtitle for a vulnerability finding. Open ports get a plain-language
+// label naming the program holding the port instead of a bare "open-port:3001".
+function vulnTitle(f) {
+  const ev = f.evidence || {};
+  if ((f.rule || '').startsWith('open-port') || ev.port) {
+    const who = ev.process || 'Unknown program';
+    return `Port ${ev.port || '?'} · ${who}`;
+  }
+  return f.rule;
+}
+function vulnSubtitle(f) {
+  const ev = f.evidence || {};
+  if ((f.rule || '').startsWith('open-port') || ev.port) {
+    const proto = (ev.protocol || 'tcp').toUpperCase();
+    const addr = ev.address || 'listening';
+    const where = ev.pid ? `pid ${ev.pid}` : '';
+    return `${proto} · ${addr}${where ? ' · ' + where : ''}${ev.exe ? ' · ' + ev.exe : ''}`;
+  }
+  return f.target;
+}
 function inspectFinding(f, vuln) {
   const c = SEV[f.severity] || SEV.info;
   const pairs = Object.entries(f.evidence || {}); if (!pairs.length) pairs.push(['rule', f.rule]);
@@ -383,14 +482,24 @@ function inspectFinding(f, vuln) {
   const srcTag = (!vuln && f.source) ? `<span class="tag" style="background:${f.source === 'downloaded' ? tint('#0E7C8C', 0.16) : tint('#E5B003', 0.16)};color:${f.source === 'downloaded' ? 'var(--accent)' : '#E5B003'}">${f.source}</span>` : '';
   const done = f.quarantined ? `<div class="note-sm" style="color:#17A98C">✓ Quarantined — moved to the reversible vault.</div>` : '';
   const actions = vuln
-    ? `<button class="btn ghost" data-action="copyfix" style="width:100%;height:40px;margin-top:20px">Copy upgrade command</button>`
+    ? (f.resolved === 'ignored'
+        ? `<div class="note-sm" style="color:var(--muted2);margin-top:18px">✓ Ignored — hidden from this list. Re-audit to bring it back.</div>`
+        : vulnActions(f) + `<button class="btn ghost" data-action="vuln-ignore" style="width:100%;height:40px;margin-top:10px">Ignore this finding</button>`)
     : (f.quarantined ? done
       : `<div class="ins-actions"><button class="btn danger" data-action="quarantine">Quarantine</button>
        <button class="btn ghost" data-action="marksafe">Mark safe</button></div>
        <div class="note-sm">Quarantine is reversible — files move to a vault, never deleted.</div>`);
+  // for the uncertain (heuristic) hits, offer a local-AI second opinion — the
+  // engine is unsure here, so a calm metadata-based verdict helps the user decide
+  const lowconf = !vuln && f.confidence && f.confidence !== 'high';
+  const second = lowconf ? `
+    <div class="section">SECOND OPINION</div>
+    <div id="second-ans" class="askai-ans">Oyster matched this with <b>${esc(f.confidence)}</b> confidence (a generic pattern, not a named virus). Ask the local AI to weigh in.</div>
+    <button class="btn ghost" data-action="second-opinion" style="width:100%;height:40px;margin-top:8px">${ic('spark', 14)} Get a second opinion (local AI)</button>` : '';
   // ask the local AI follow-up questions about this specific file
   const askai = vuln ? '' : `
-    <div class="section">ASK AI ABOUT THIS FILE</div>
+    <div class="section" style="display:flex;align-items:center;justify-content:space-between">
+      <span>ASK AI ABOUT THIS FILE</span>${onlineToggle()}</div>
     <div class="askai">
       <input id="askfile-in" class="chat-input" placeholder="e.g. “is this safe to delete?” or “what does this file do?”">
       <button class="btn primary" data-action="askfile">${ic('spark', 14)} Ask</button>
@@ -398,10 +507,10 @@ function inspectFinding(f, vuln) {
     <div id="askfile-ans" class="askai-ans"></div>`;
   return `<div><span class="chip" style="background:${tint(c, 0.16)};color:${c}">${sevLabel(f.severity)}</span>
       <span class="kind"> ${esc((f.kind || '').replace(/_/g, ' '))}</span>${srcTag}</div>
-    <div class="ins-title">${esc(vuln ? f.rule : f.name)}</div>
-    <div class="ins-dir" style="${vuln ? 'color:var(--accent)' : ''}">${esc(vuln ? f.target : f.dir + '/')}</div>
+    <div class="ins-title">${esc(vuln ? vulnTitle(f) : f.name)}</div>
+    <div class="ins-dir" style="${vuln ? 'color:var(--accent)' : ''}">${esc(vuln ? vulnSubtitle(f) : f.dir + '/')}</div>
     ${f.detail ? `<p class="ins-detail">${esc(f.detail)}</p>` : ''}
-    ${ai}<div class="section">${vuln ? 'DETAILS' : 'EVIDENCE'}</div>${kvTable(pairs)}${actions}${askai}`;
+    ${ai}<div class="section">${vuln ? 'DETAILS' : 'EVIDENCE'}</div>${kvTable(pairs)}${actions}${second}${askai}`;
 }
 function inspectProc(t) {
   const c = procColor(t.score);
@@ -746,6 +855,13 @@ async function onContentClick(e) {
   const t = e.target.closest('[data-action]'); if (!t) return;
   const a = t.dataset.action;
   if (a === 'select') { S.sel[S.page] = S.data[S.page][+t.dataset.idx]; renderRows(); renderInspector(); return; }
+  if (a === 'check') { e.stopPropagation(); toggleCheck(S.data[S.page][+t.dataset.idx]); return; }
+  if (a === 'check-all') return toggleCheckAll();
+  if (a === 'bulk-quarantine') return bulkQuarantine();
+  if (a === 'bulk-marksafe') return bulkMarkSafe();
+  if (a === 'bulk-ignore') return bulkIgnore();
+  if (a === 'bulk-suspend') return bulkProc('suspend');
+  if (a === 'bulk-kill') return bulkProc('kill');
   if (a === 'findtab') { S.findFilter = t.dataset.tag; const tb = $('find-tabs'); if (tb) tb.innerHTML = findingTabsHtml(); renderRows(); return; }
   if (a === 'open-fda') return api.openFDA();
   if (a === 'toggle-downloaded') { S.downloadedOnly = !S.downloadedOnly; renderScan(); return; }
@@ -766,17 +882,126 @@ async function onContentClick(e) {
   if (a === 'chat-send') return chatSend();
   if (a === 'apps-scan') return appsScan();
   if (a === 'app-review') return openAppReview(+t.dataset.idx);
+  if (a === 'quar-open') return quarantineOpen();
+  if (a === 'quar-empty') return quarantineEmpty();
+  if (a === 'quar-restore') return quarantineRestore(t.dataset.qid);
+  if (a === 'second-opinion') return secondOpinion();
+  if (a === 'reveal') return api.reveal(t.dataset.path);
+  if (a === 'close-port') return closePort();
+  if (a === 'copyfix') return copyFix();
+  if (a === 'open-ext') { e.preventDefault(); return api.openExternal(t.dataset.url); }
+  if (a === 'toggle-online') return toggleOnline();
+  if (a === 'vuln-ignore') return vulnIgnore();
 }
 
+// ---------- vulnerability actions ----------
+async function closePort() {
+  const f = S.sel.Vulnerabilities; if (!f) return;
+  const ev = f.evidence || {};
+  const pid = parseInt(ev.pid, 10);
+  if (!pid) { setStatus('No process id recorded for this port.'); return; }
+  const who = ev.process || 'The program';
+  const r = await api.confirm({
+    message: 'Stop the program on this port?', type: 'warning', buttons: ['Cancel', 'Stop it'],
+    detail: `${who} (pid ${pid}) is listening on port ${ev.port}. Stopping it closes the port. `
+      + 'If it’s a system service the OS may relaunch it; protected processes are refused.',
+  });
+  if (r !== 1) return;
+  try {
+    await api.rpc('close_port', { pid, name: ev.process || '' });
+    setStatus(`Stopped ${who} (pid ${pid}) — port ${ev.port} closed. Re-audit to confirm.`);
+  } catch (e) { setStatus('Could not stop it: ' + e.message); }
+}
+function fixCommand(f) {
+  const ev = f.evidence || {};
+  const eco = (ev.ecosystem || '').toLowerCase();
+  if (ev.package || ev.ecosystem) {
+    const pkg = ev.package || '';
+    const fixed = ev.fixed_in && ev.fixed_in !== 'unknown' ? ev.fixed_in : '';
+    if (eco === 'npm') return `npm install ${pkg}@${fixed || 'latest'}`;
+    if (eco === 'pypi') return fixed ? `pip install -U "${pkg}==${fixed}"` : `pip install -U ${pkg}`;
+    return `# update ${pkg} to ${fixed || 'the latest fixed version'}`;
+  }
+  const name = (f.target || '').replace('posture:', '');
+  const POSTURE_FIX = {
+    'Application Firewall': 'sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on',
+    'FileVault disk encryption': 'sudo fdesetup enable',
+    'Gatekeeper': 'sudo spctl --global-enable',
+    'System Integrity Protection': '# Reboot into Recovery (hold power), open Terminal, run: csrutil enable',
+    'Windows Firewall profiles enabled': 'Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True',
+    'Defender real-time protection': 'Set-MpPreference -DisableRealtimeMonitoring $false',
+    'BitLocker (C:)': 'Enable-BitLocker -MountPoint "C:" -EncryptionMethod XtsAes128 -UsedSpaceOnly',
+  };
+  return POSTURE_FIX[name] || '';
+}
+async function copyFix() {
+  const f = S.sel.Vulnerabilities; if (!f) return;
+  const cmd = fixCommand(f);
+  if (!cmd) { setStatus('No automatic fix command is available for this item.'); return; }
+  try { await navigator.clipboard.writeText(cmd); setStatus('Copied to clipboard: ' + cmd); }
+  catch { setStatus('Run this: ' + cmd); }
+}
+
+async function secondOpinion() {
+  const f = S.sel.Files; if (!f) return;
+  const box = $('second-ans');
+  if (box) box.textContent = 'Consulting the local model… (this can take a few seconds)';
+  try {
+    const r = await api.rpc('second_opinion', { file: {
+      name: f.name, dir: f.dir, path: f.target, rule: f.rule, severity: f.severity,
+      kind: f.kind, detail: f.detail, source: f.source, evidence: f.evidence } });
+    if (!box) return;
+    if (!r.available) { box.textContent = r.text; return; }
+    const color = r.verdict.includes('harmful') ? '#E5484D'
+      : r.verdict.includes('closer') ? '#E5B003' : '#17A98C';
+    box.innerHTML = `<div style="color:${color};font-weight:600;margin-bottom:5px">${esc(r.verdict)}</div>`
+      + `<div>${esc(r.why)}</div>`
+      + (r.suggestion ? `<div class="note-sm" style="margin-top:7px">Suggested: ${esc(r.suggestion)}</div>` : '')
+      + `<div class="note-sm" style="margin-top:7px;color:var(--muted2)">A local-AI opinion based on the file’s details — offline, no data left your computer.</div>`;
+  } catch (e) { if (box) box.textContent = 'Could not get a second opinion: ' + e.message; }
+}
+
+// Toggle the AI's Online mode. Turning it ON breaks Oyster's offline guarantee,
+// so the first time in a session we warn and require an explicit confirm.
+async function toggleOnline() {
+  if (!S.aiOnline && !S.aiOnlineWarned) {
+    const r = await api.confirm({
+      message: 'Let the AI search the web?', type: 'warning',
+      buttons: ['Stay offline', 'Turn on online mode'],
+      detail: 'Oyster is fully offline by default — nothing leaves your computer. '
+        + 'Online mode lets the AI assistant look things up on the web for extra '
+        + 'context.\n\nWhen it’s ON, your typed question (and the file’s name/hash) '
+        + 'is sent to a search engine — never the file’s contents. It only ever '
+        + 'contacts that one search engine, and your scans always stay 100% offline. '
+        + 'You can turn this back off anytime.',
+    });
+    if (r !== 1) return;            // declined — stay offline
+    S.aiOnlineWarned = true;        // don't nag again this session
+  }
+  S.aiOnline = !S.aiOnline;
+  const keep = $('askfile-in') && $('askfile-in').value;   // don't lose typed question
+  renderInspector();
+  if (keep && $('askfile-in')) $('askfile-in').value = keep;
+}
 async function askFile() {
   const f = S.sel.Files; if (!f) return;
   const inp = $('askfile-in'); const q = inp && inp.value.trim(); if (!q) return;
-  const ans = $('askfile-ans'); if (ans) ans.textContent = 'Thinking… (running locally)';
+  const ans = $('askfile-ans');
+  if (ans) ans.textContent = S.aiOnline
+    ? 'Searching the web and thinking…' : 'Thinking… (running locally)';
   try {
-    const r = await api.rpc('ask_file', { question: q, file: {
+    const r = await api.rpc('ask_file', { question: q, online: S.aiOnline, file: {
       name: f.name, dir: f.dir, path: f.target, rule: f.rule, severity: f.severity,
       kind: f.kind, detail: f.detail, source: f.source, evidence: f.evidence } });
-    if ($('askfile-ans')) $('askfile-ans').textContent = r.text;
+    if (!$('askfile-ans')) return;
+    let html = `<div>${esc(r.text)}</div>`;
+    if (r.online && r.sources && r.sources.length) {
+      html += `<div class="note-sm" style="margin-top:8px;color:var(--muted2)">Sources consulted online:</div>`
+        + r.sources.map((s) => `<div class="src-link"><a href="${esc(s.url)}" data-action="open-ext" data-url="${esc(s.url)}">${esc(s.title || s.url)}</a></div>`).join('');
+    } else if (S.aiOnline && !r.online) {
+      html += `<div class="note-sm" style="margin-top:8px;color:var(--muted2)">(No web results found — answered offline.)</div>`;
+    }
+    $('askfile-ans').innerHTML = html;
   } catch (e) { if ($('askfile-ans')) $('askfile-ans').textContent = 'Could not get an answer: ' + e.message; }
 }
 
@@ -882,7 +1107,7 @@ async function runScan(method, params) {
   if (S.busy) return; S.busy = true; startScanUI('Scanning…');
   try {
     const r = await api.rpc(method, params);
-    S.report = r; S.data.Files = r.findings; S.sel.Files = null; S.scanned = true;
+    S.report = r; S.data.Files = r.findings; S.sel.Files = null; S.checked.Files.clear(); S.scanned = true;
     setStatus((r.canceled ? 'Stopped' : 'Done')
       + ` · ${r.filesSeen.toLocaleString()} files in ${r.secs}s · ${r.findings.length} finding(s)`
       + (r.filesUnreadable ? ` · ${r.filesUnreadable.toLocaleString()} unreadable` : '') + ' · offline.');
@@ -904,7 +1129,7 @@ async function deepScan() {
   startScanUI('Full scan — files…');
   try {
     const r = await api.rpc('deep_scan', {});
-    S.report = r; S.data.Files = r.findings; S.sel.Files = null; S.scanned = true;
+    S.report = r; S.data.Files = r.findings; S.sel.Files = null; S.checked.Files.clear(); S.scanned = true;
     setStatus(`Files: ${r.findings.length} finding(s) in ${r.secs}s.`);
   } catch (e) { setStatus('File scan error: ' + e.message); }
   if (scan.canceling) { endScanUI(); S.busy = false; updateNav(); renderScan(); return; }
@@ -913,7 +1138,7 @@ async function deepScan() {
   scan.label = 'Full scan — processes…'; paintScanBar();
   try {
     const r = await api.rpc('sweep_processes', {});
-    S.data.Processes = r.processes; S.procTotal = r.total; S.sel.Processes = null;
+    S.data.Processes = r.processes; S.procTotal = r.total; S.sel.Processes = null; S.checked.Processes.clear();
     setStatus(`Processes: ${r.processes.length} flagged of ${(r.total || 0).toLocaleString()}.`);
   } catch (e) { setStatus('Process sweep error: ' + e.message); }
   if (scan.canceling) { endScanUI(); S.busy = false; updateNav(); renderScan(); return; }
@@ -922,7 +1147,7 @@ async function deepScan() {
   scan.label = 'Full scan — vulnerabilities…'; paintScanBar();
   try {
     const r = await api.rpc('audit_vulns', {});
-    S.data.Vulnerabilities = r.vulns; S.sel.Vulnerabilities = null;
+    S.data.Vulnerabilities = r.vulns; S.sel.Vulnerabilities = null; S.checked.Vulnerabilities.clear();
     setStatus(`Vulnerabilities: ${r.vulns.length} issue(s) found.`);
   } catch (e) { setStatus('Vuln audit error: ' + e.message); }
   if (scan.canceling) { endScanUI(); S.busy = false; updateNav(); renderScan(); return; }
@@ -942,7 +1167,7 @@ async function deepScan() {
 }
 async function sweep() {
   if (S.busy) return; S.busy = true; startScanUI('Inspecting processes…');
-  try { const r = await api.rpc('sweep_processes'); S.data.Processes = r.processes; S.procTotal = r.total; S.sel.Processes = null; S.scanned = true; setStatus(`Swept ${(r.total||0).toLocaleString()} processes · ${r.processes.length} flagged.`); }
+  try { const r = await api.rpc('sweep_processes'); S.data.Processes = r.processes; S.procTotal = r.total; S.sel.Processes = null; S.checked.Processes.clear(); S.scanned = true; setStatus(`Swept ${(r.total||0).toLocaleString()} processes · ${r.processes.length} flagged.`); }
   catch (e) { setStatus('Sweep failed: ' + e.message); }
   endScanUI(); S.busy = false; if (S.page === 'Processes') renderScan(); updateNav();
 }
@@ -960,7 +1185,7 @@ async function updateDefs() {
 }
 async function audit() {
   if (S.busy) return; S.busy = true; startScanUI('Auditing software & OS…');
-  try { const r = await api.rpc('audit_vulns'); S.data.Vulnerabilities = r.vulns; S.sel.Vulnerabilities = null; S.scanned = true; setStatus(`${r.vulns.length} vulnerability finding(s).`); }
+  try { const r = await api.rpc('audit_vulns'); S.data.Vulnerabilities = r.vulns; S.sel.Vulnerabilities = null; S.checked.Vulnerabilities.clear(); S.scanned = true; setStatus(`${r.vulns.length} vulnerability finding(s).`); }
   catch (e) { setStatus('Audit failed: ' + e.message); }
   endScanUI(); S.busy = false; if (S.page === 'Vulnerabilities') renderScan(); updateNav();
 }
@@ -981,6 +1206,81 @@ async function markSafe() {
   f.resolved = 'safe'; renderRows(); renderInspector();
   setStatus(`${f.name} marked safe.`);
 }
+async function vulnIgnore() {
+  const f = S.sel.Vulnerabilities; if (!f) return;
+  try { await api.rpc('mark_safe', { target: f.target }); } catch (_e) { /* best-effort log */ }
+  f.resolved = 'ignored';
+  renderRows(); renderInspector(); updateNav();
+  setStatus(`Ignored: ${vulnTitle(f)}. Re-audit to bring it back.`);
+}
+
+// ---------- quarantine vault ----------
+function qHuman(b) {
+  b = b || 0;
+  if (b < 1024) return b + ' B';
+  const u = ['KB', 'MB', 'GB', 'TB']; let i = -1;
+  do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
+  return b.toFixed(b < 10 ? 1 : 0) + ' ' + u[i];
+}
+async function renderQuarantine() {
+  content.innerHTML = `<div class="summary-page"><div class="inner">
+    <div class="prose panel" id="quar-body" style="color:var(--muted)">Loading quarantine vault…</div>
+  </div></div>`;
+  await refreshQuarantine();
+}
+async function refreshQuarantine() {
+  let r;
+  try { r = await api.rpc('quarantine_info'); }
+  catch (e) { const b = $('quar-body'); if (b) b.textContent = 'Could not read the vault: ' + e.message; return; }
+  S.quar = r;
+  const body = $('quar-body'); if (!body) return;
+  const head = `<div class="rec-head">${r.count} item(s) · ${qHuman(r.bytes)} in
+    <span class="mono" style="color:var(--accent)">${esc(r.dir)}</span></div>
+    <div class="ins-actions" style="margin:12px 0">
+      <button class="btn" data-action="quar-open">${ic('folder', 14)} Open folder</button>
+      <button class="btn danger" data-action="quar-empty" ${r.count ? '' : 'disabled'}>${ic('trash', 14)} Empty vault</button>
+    </div>
+    <div class="note-sm">Quarantined files are moved here (defanged so they can’t run), never deleted — restore one anytime. <b>Empty vault</b> erases them for good.</div>`;
+  if (!r.count) {
+    body.innerHTML = head + `<div class="sub3" style="margin-top:14px">The vault is empty — nothing has been quarantined.</div>`;
+    return;
+  }
+  const rows = r.items.map((it) => `<div class="q-row" style="display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line)">
+      <div style="flex:1;min-width:0">
+        <div class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.name)}</div>
+        <div class="note-sm" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.original)} · ${qHuman(it.size)}${it.reason ? ' · ' + esc(it.reason) : ''}</div>
+      </div>
+      <button class="btn" data-action="quar-restore" data-qid="${esc(it.qid)}">Restore</button>
+    </div>`).join('');
+  body.innerHTML = head + `<div style="margin-top:8px">${rows}</div>`;
+}
+async function quarantineOpen() {
+  if (S.quar && S.quar.dir) await api.openPath(S.quar.dir);
+}
+async function quarantineEmpty() {
+  const c = S.quar || {};
+  if (!c.count) return;
+  const r = await api.confirm({
+    message: 'Empty the quarantine vault?', type: 'warning', buttons: ['Cancel', 'Empty vault'],
+    detail: `This permanently erases ${c.count} quarantined file(s) (${qHuman(c.bytes)}). This cannot be undone.`,
+  });
+  if (r !== 1) return;
+  try {
+    const x = await api.rpc('quarantine_empty');
+    setStatus(`Vault emptied · ${x.removed} file(s) erased · ${qHuman(x.bytes)} freed.`);
+  } catch (e) { setStatus('Could not empty the vault: ' + e.message); }
+  await refreshQuarantine();
+}
+async function quarantineRestore(qid) {
+  const r = await api.confirm({ message: 'Restore this file?', buttons: ['Cancel', 'Restore'],
+    detail: 'It will be put back where it was originally found.' });
+  if (r !== 1) return;
+  try {
+    const x = await api.rpc('quarantine_restore', { qid });
+    setStatus(`Restored to ${x.original}.`);
+  } catch (e) { setStatus('Restore failed: ' + e.message); }
+  await refreshQuarantine();
+}
 async function procAction(kind) {
   const t = S.sel.Processes; if (!t) return;
   if (t.protected) { await api.confirm({ message: 'Protected process', detail: t.name + ' is protected and will not be killed.', buttons: ['OK', 'OK'] }); return; }
@@ -988,6 +1288,82 @@ async function procAction(kind) {
   if (r !== 1) return;
   try { await api.rpc(kind, { pid: t.pid, name: t.name }); setStatus(`${kind} applied to pid ${t.pid}.`); }
   catch (e) { setStatus(kind + ' failed: ' + e.message); }
+}
+
+// ---------- multi-select bulk actions ----------
+function checkedList() { return Array.from(S.checked[S.page]); }
+function toggleCheck(o) {
+  if (!o) return;
+  const set = S.checked[S.page];
+  if (set.has(o)) set.delete(o); else set.add(o);
+  renderRows();   // refresh the row's checkmark + the bulk bar
+}
+function toggleCheckAll() {
+  const set = S.checked[S.page];
+  const vis = visibleItems();
+  if (set.size >= vis.length) set.clear();          // all selected -> clear
+  else vis.forEach((o) => set.add(o));              // otherwise select everything visible
+  renderRows();
+}
+async function bulkQuarantine() {
+  const items = checkedList().filter((f) => !f.resolved);
+  if (!items.length) { setStatus('Nothing to quarantine in the selection.'); return; }
+  const r = await api.confirm({ message: `Quarantine ${items.length} file(s)?`, type: 'warning',
+    detail: 'Each is moved to the reversible vault — never deleted. You can restore them anytime.',
+    buttons: ['Cancel', 'Quarantine all'] });
+  if (r !== 1) return;
+  let ok = 0, fail = 0;
+  for (const f of items) {
+    setStatus(`Quarantining ${++ok + fail} of ${items.length}…`);
+    try { await api.rpc('quarantine', { target: f.target, rule: f.rule });
+      f.quarantined = true; f.resolved = 'quarantined'; }
+    catch (_e) { fail++; ok--; }
+  }
+  S.checked[S.page].clear();
+  renderRows(); renderInspector(); updateNav();
+  setStatus(`Quarantined ${ok} file(s)${fail ? `, ${fail} failed` : ''}. Moved to the reversible vault.`);
+}
+async function bulkMarkSafe() {
+  const items = checkedList().filter((f) => !f.resolved);
+  if (!items.length) { setStatus('Nothing to mark safe in the selection.'); return; }
+  for (const f of items) {
+    try { await api.rpc('mark_safe', { target: f.target }); } catch (_e) { /* best-effort */ }
+    f.resolved = 'safe';
+  }
+  S.checked[S.page].clear();
+  renderRows(); renderInspector(); updateNav();
+  setStatus(`Marked ${items.length} file(s) safe.`);
+}
+async function bulkIgnore() {
+  const items = checkedList().filter((f) => !f.resolved);
+  if (!items.length) { setStatus('Nothing to ignore in the selection.'); return; }
+  for (const f of items) {
+    try { await api.rpc('mark_safe', { target: f.target }); } catch (_e) { /* best-effort */ }
+    f.resolved = 'ignored';
+  }
+  S.checked[S.page].clear();
+  renderRows(); renderInspector(); updateNav();
+  setStatus(`Ignored ${items.length} finding(s). Re-audit to bring them back.`);
+}
+async function bulkProc(kind) {
+  const all = checkedList();
+  const items = all.filter((t) => !t.protected);
+  const skipped = all.length - items.length;
+  if (!items.length) { setStatus(skipped ? 'All selected processes are protected — skipped.' : 'No processes selected.'); return; }
+  const r = await api.confirm({
+    message: `${kind === 'suspend' ? 'Suspend' : 'KILL'} ${items.length} process(es)?`, type: 'warning',
+    detail: (kind === 'suspend' ? 'Suspending freezes them — reversible.' : 'Killing closes them — not reversible.')
+      + (skipped ? `\n\n${skipped} protected process(es) will be skipped.` : ''),
+    buttons: ['Cancel', kind === 'suspend' ? 'Suspend all' : 'Kill all'] });
+  if (r !== 1) return;
+  let ok = 0, fail = 0;
+  for (const t of items) {
+    try { await api.rpc(kind, { pid: t.pid, name: t.name }); ok++; } catch (_e) { fail++; }
+  }
+  S.checked[S.page].clear();
+  renderRows();
+  setStatus(`${kind === 'suspend' ? 'Suspended' : 'Killed'} ${ok} process(es)`
+    + `${fail ? `, ${fail} failed` : ''}${skipped ? `, ${skipped} protected skipped` : ''}.`);
 }
 
 // ---------- misc ----------

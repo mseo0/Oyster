@@ -116,6 +116,13 @@ class HashCache:
         )
         self.db.commit()
 
+    def has_known_bad(self) -> bool:
+        """True if any local known-bad hashes are loaded. When the set is empty
+        there's nothing to match a file's hash against, so the scanner can skip
+        hashing files it won't also content-scan — a big saving on a full scan."""
+        return self.db.execute(
+            "SELECT 1 FROM known_bad LIMIT 1").fetchone() is not None
+
     def known_bad_label(self, sha256: str) -> str | None:
         row = self.db.execute(
             "SELECT label FROM known_bad WHERE sha256=?", (sha256,)

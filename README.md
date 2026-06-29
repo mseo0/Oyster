@@ -27,29 +27,50 @@ On first launch Oyster offers to set up its scanning definitions (ClamAV signatu
 1. Run an antivirus that uploads file hashes (or whole files) to someone's cloud
 2. Squint at Activity Monitor / Task Manager and guess which processes are sketchy
 3. Manually cross-reference installed software against CVE databases
-4. Get a cryptic verdict like `Trojan.Win32.Agent.xyz` with no idea what to do
-5. Hope the "delete" button didn't just nuke something important
+4. Check `lsof`/`netstat` by hand to see what's listening on the network
+5. Get a cryptic verdict like `Trojan.Win32.Agent.xyz` with no idea what to do
+6. Hope the "delete" button didn't just nuke something important
 
 **With Oyster:**
 ```
-Files · Processes · Vulnerabilities · Cleanup · AI Summary
+Files · Processes · Vulnerabilities · Cleanup · Applications · Quarantine · AI Summary
 ```
 One desktop app scans all of it locally, scores the suspicious stuff, explains each finding in everyday language, and never deletes anything irreversibly — "delete" means "move to a restorable quarantine."
 
+### Why not another local antivirus with a UI?
+
+There are plenty of ClamAV front-ends (ClamTk, ClamXAV) and consumer suites (Malwarebytes, the built-in Defender/XProtect). Oyster is built for a different job: a **thorough, explainable, genuinely-offline checkup of the whole machine** — not just a file scanner with a window around it.
+
+| | ClamAV GUIs (ClamTk/ClamXAV) | Cloud suites (Malwarebytes, etc.) | **Oyster** |
+|---|---|---|---|
+| **Truly offline** | Mostly, but reputation lookups vary | No — uploads hashes/files for cloud scoring | **Yes — the scanner imports no networking library; it *can't* open a socket** |
+| **What it inspects** | Files only | Files + some behaviour | **Files, processes, CVEs, open ports, OS posture, app leftovers** |
+| **Explains findings** | Raw signature names | Marketing-grade severity labels | **Plain-English, written by a local LLM — plus a second opinion on the uncertain ones** |
+| **False-positive handling** | You're on your own | Vendor allowlists | **Corroborates heuristic hits with code-signing + provenance, then downgrades likely FPs** |
+| **"Delete" is reversible** | Usually a real delete | Quarantine, vendor-managed | **Always — a restorable vault you control, with its own management tab** |
+| **Runs on an 8GB laptop** | Yes | Heavy background agent | **Yes — skip-funnel + the model loads only *after* the disk scan** |
+| **Cost / openness** | Free / open | Subscription / closed | **Free, MIT, fully auditable** |
+
+The short version: other tools answer *"is this one file in ClamAV's database?"* Oyster answers *"is this machine okay, and what should I actually do about each thing you found?"* — and proves it stayed offline by how the code is shaped, not by a privacy policy.
+
 ## What It Does
 
-- **Files:** on-demand scan with **ClamAV + YARA + known-bad hashes**, reversible quarantine, and a "downloaded only" filter so it ignores files you made yourself.
+- **Files:** on-demand scan with **ClamAV + YARA + known-bad hashes**, reversible quarantine, and a "downloaded only" filter so it ignores files you made yourself. Heuristic hits are corroborated with code-signing + provenance so signed system/app files stop getting flagged as malware. Uncertain hits get a one-click **local-AI second opinion**.
 - **Processes:** running programs scored by suspicious behaviour — masquerading, temp-dir binaries, unsigned-and-networked.
-- **Vulnerabilities:** your installed packages matched against an **offline OSV/CVE snapshot**, plus OS posture (Firewall, SIP, FileVault, Gatekeeper).
+- **Vulnerabilities:** your installed packages matched against an **offline OSV/CVE snapshot**, your **open/listening network ports** (what's reachable from the network, and whether it's a risky service or a program running from a temp folder), plus OS posture (Firewall, SIP, FileVault, Gatekeeper).
 - **Cleanup:** finds junk, duplicates, large & stale files; the AI flags *personally important* files (tax, legal, identity, credentials) and keeps them out of every delete suggestion, and warns before touching anything that looks like it belongs to a program. A **chat box** takes plain-English commands (`remove all files with ENGE in the name`). Everything is reversible.
+- **Applications:** uninstall apps and sweep the leftover files they leave behind, all into the reversible vault.
+- **Quarantine:** a dedicated view of the reversible vault — **restore** any item to where it came from, **open the folder**, or **empty the vault** to reclaim disk for good. Nothing leaves the vault unless you say so.
 - **AI Summary:** a plain-English read-out written locally by Ollama after a scan — it prioritizes and explains, but never decides what's malware on its own.
+
+All of the local-AI features run against a model on `127.0.0.1` only, and Oyster disables the model's hidden "thinking" step so answers come back in seconds rather than tens of seconds.
 
 ## Reliability
 
 - **Real detection engines do the verdicts** — ClamAV signatures, YARA rules, hash lookups. The model only reads, prioritizes, and explains those findings; it never invents a detection.
 - **Built for a modest machine.** A skip-funnel throws most files away early, so by the time anything reaches the AI you're down from millions of files to a few dozen findings. The model loads into memory *only* during that final step, after the disk scan — an 8GB laptop never holds a full scan and a language model at once.
 - **Nothing destructive happens on its own.** "Delete" moves to a reversible quarantine vault, and Oyster always asks before touching anything important.
-- **Incremental hash cache** means re-scans skip unchanged files.
+- **Fast by skipping work, not corners.** An **incremental hash cache** lets re-scans skip unchanged files, a **verdict cache** remembers files ClamAV already cleared (auto-invalidated when the virus DB or rules change), batched scanning loads ClamAV's signature database once per batch instead of once per file, and files that will never be content-scanned aren't needlessly read end-to-end. The full scan also runs every check — files, processes, vulnerabilities, ports, posture, cleanup — back to back.
 
 ```
 ALL files ──skip rules──> candidates ──hash + known-bad──> unknown
@@ -169,7 +190,9 @@ python -m updater.update --all             # both at once
 | YARA | Pattern rules | Bundled under [`rules/`](rules/); `example.yar` flags EICAR |
 | Known-bad hashes | Instant hash verdicts | Local set, no network lookup |
 | OSV / CVE | Vulnerability matching | Offline snapshot via [updater/update.py](updater/update.py) |
+| Open ports | Network-exposure check | Listening TCP sockets + their process, scored in [core/portscan.py](core/portscan.py) |
 | OS posture | Firewall, SIP, FileVault, Gatekeeper | Read-only system checks in [core/posture.py](core/posture.py) |
+| Local LLM | Plain-English explanation + second opinion | Loopback-only Ollama; reads findings, never invents detections |
 
 ## Flags
 
@@ -220,6 +243,8 @@ core/                   # the scanning engine — no networking libraries
 ├── hashcache.py        # incremental hash cache (skip unchanged files)
 ├── engine.py           # ClamAV: signatures, YARA, archive unpacking
 ├── processes.py        # suspicious-process scoring
+├── portscan.py         # open/listening-port network-exposure inspector
+├── risk.py             # heuristic-hit triage (signing + provenance) → ranked risk
 ├── quarantine.py       # reversible "delete" vault
 ├── findings.py         # findings store + action log
 ├── vulnaudit.py        # installed software vs. offline CVE data

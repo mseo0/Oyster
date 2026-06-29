@@ -53,6 +53,30 @@ class Quarantine:
         os.remove(path)  # safe: we hold a reversible copy
         return qid
 
+    def empty(self) -> dict:
+        """Permanently delete everything in the vault — the one place in Oyster
+        where files really are erased. Returns how many items and bytes were
+        freed. Irreversible by design: this is the user emptying their trash."""
+        data = self._load()
+        removed, freed = 0, 0
+        for qid, entry in list(data.items()):
+            stored = self.vault / f"{qid}.qbin"
+            try:
+                freed += stored.stat().st_size
+            except OSError:
+                pass
+            stored.unlink(missing_ok=True)
+            removed += 1
+        # Sweep any orphaned .qbin files not tracked in the manifest, too.
+        for stray in self.vault.glob("*.qbin"):
+            try:
+                freed += stray.stat().st_size
+            except OSError:
+                pass
+            stray.unlink(missing_ok=True)
+        self._save({})
+        return {"removed": removed, "bytes": freed}
+
     def restore(self, qid: str) -> Path:
         # qids are uuid4 hex (see quarantine()); reject anything else so a
         # tampered/garbage id can never traverse out of the vault via {qid}.qbin.

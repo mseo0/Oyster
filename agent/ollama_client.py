@@ -29,15 +29,31 @@ class Ollama:
             return False
 
     def generate(self, prompt: str, system: str = "",
-                 fmt_json: bool = False) -> str:
+                 fmt_json: bool = False, think: bool = False) -> str:
         body = {
             "model": self.model,
             "prompt": prompt,
             "system": system,
             "stream": False,
+            # Oyster's prompts are simple (summarize, classify, plain-English Q&A),
+            # so we don't want the model burning 30-60s on hidden chain-of-thought.
+            # "Thinking" models (qwen3, etc.) answer ~15x faster with this off — the
+            # difference between a chat that feels instant and one that looks hung.
+            "think": think,
         }
         if fmt_json:
             body["format"] = "json"
+        try:
+            return self._post_generate(body)
+        except urllib.error.HTTPError as e:
+            # Older Ollama / non-thinking models reject the `think` field with a
+            # 400. Drop it and retry so the call still succeeds everywhere.
+            if e.code == 400 and "think" in body:
+                body.pop("think", None)
+                return self._post_generate(body)
+            raise
+
+    def _post_generate(self, body: dict) -> str:
         data = json.dumps(body).encode()
         req = urllib.request.Request(
             netguard.assert_loopback(f"{self.base_url}/api/generate"),
