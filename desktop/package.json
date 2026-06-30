@@ -1,7 +1,7 @@
 {
   "name": "oyster",
   "productName": "Oyster",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Oyster — local agentic antivirus that never phones home",
   "main": "electron/main.js",
   "scripts": {
