@@ -90,8 +90,18 @@ class ClamEngine:
         if self.extra_yara_dir and self.extra_yara_dir.exists():
             for f in sorted(self.extra_yara_dir.glob("*.yar")):
                 try:
-                    st = f.stat()
-                    parts.append(f"{f.name}:{st.st_size}:{int(st.st_mtime)}")
+                    # Fingerprint the rule *contents*, not stat(). mtime changes
+                    # every time the app is reinstalled/upgraded (the bundled
+                    # rules are rewritten with fresh timestamps — and under a
+                    # onefile build _MEIPASS is re-extracted to a temp dir on
+                    # every launch), which would needlessly invalidate every
+                    # cached clean verdict and force a full re-scan. The rule
+                    # bytes are what actually affect a match, so hashing them
+                    # keeps the cache valid across reinstalls and only changes
+                    # the fingerprint when the rules genuinely change.
+                    data = f.read_bytes()
+                    parts.append(f"{f.name}:{len(data)}:"
+                                 f"{hashlib.sha1(data).hexdigest()[:12]}")
                 except OSError:
                     pass
         self._sig_ver = hashlib.sha1("|".join(parts).encode()).hexdigest()[:16]

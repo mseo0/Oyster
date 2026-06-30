@@ -12,6 +12,8 @@
 
 A local antivirus that never phones home. It scans your files, sweeps what's running, checks your installed software against known vulnerabilities, then hands the results to a local LLM that explains what it found in plain English. No cloud, no account, no uploads — and it runs on an ordinary 8GB laptop, not just a workstation with a GPU.
 
+![Oyster demo](docs/oyster-demo.gif)
+
 ## Quick Start
 
 Grab the installer from the [**Releases**](../../releases) page, then:
