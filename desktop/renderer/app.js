@@ -32,7 +32,7 @@ const NAV = [
   { key: 'Processes', icon: 'cpu', sub: 'Running programs, scored by suspicious behaviour.', sec: 'scan' },
   { key: 'Vulnerabilities', icon: 'shield', sub: 'Installed software & OS settings vs. offline CVE data.', sec: 'scan' },
   { key: 'Cleanup', icon: 'broom', sub: 'Find junk, duplicates & clutter — organize with one click.', sec: 'tools' },
-  { key: 'Applications', icon: 'apps', sub: 'Uninstall apps and clear the files they leave behind.', sec: 'tools' },
+  { key: 'Applications', icon: 'apps', sub: 'Clean-uninstall apps — the app plus every related file, reversibly.', sec: 'tools' },
   { key: 'Quarantine', icon: 'trash', sub: 'Files moved to the reversible vault — restore, open, or empty.', sec: 'tools' },
   { key: 'AI Summary', icon: 'spark', sub: 'A plain-English read-out, written locally just now.', sec: 'report' },
 ];
@@ -571,7 +571,7 @@ function renderApplications() {
   const isWin = a && a.platform && a.platform.startsWith('win');
   let body;
   if (!a) {
-    body = `<div class="empty">Scan to list ${isWin ? 'installed programs' : 'installed apps'} and the files they leave behind.</div>`;
+    body = `<div class="empty">Scan to list ${isWin ? 'installed programs' : 'installed apps'} and clean-uninstall them — Oyster removes the ${isWin ? 'program' : 'app'} <b>and every related file it left behind</b> (caches, preferences, support data, logs), all reversibly.</div>`;
   } else if (a.note) {
     body = `<div class="empty">${esc(a.note)}</div>`;
   } else if (!a.apps.length) {
@@ -591,7 +591,7 @@ function renderApplications() {
              <button class="btn ghost" data-action="app-review" data-idx="${i}">Review</button>`}
       </div>`;
     }).join('');
-    body = `<div class="rec-head">${a.apps.length} ${isWin ? 'program(s)' : 'app(s)'} · ${humanBytes(total)} on disk</div>${cards}`;
+    body = `<div class="rec-head">${a.apps.length} ${isWin ? 'program(s)' : 'app(s)'} · ${humanBytes(total)} on disk · Review does a <b>clean uninstall</b> — the ${isWin ? 'program' : 'app'} plus every related file, reversibly</div>${cards}`;
   }
   content.innerHTML = `
     <div class="taskbar panel">
@@ -630,10 +630,10 @@ function openAppReview(idx) {
   const items = win ? (app.leftovers || []) : [bundle, ...(app.leftovers || [])];
   openReview({ kind: 'app', appName: app.name, win, uid: app.uid, appPath: app.path,
     headerItem: win ? bundle : null,
-    title: (win ? 'Uninstall ' : 'Uninstall ') + app.name,
+    title: 'Clean-uninstall ' + app.name,
     detail: win
-      ? `Removes ${app.name} using its own uninstaller. Any leftover app-data folders below can also be moved to the reversible cleanup vault.`
-      : `${app.name} — ${app.human} total${app.leftoverCount ? ` (${app.leftoverCount} leftover files)` : ''}. Everything moves to the reversible cleanup vault.`,
+      ? `Removes ${app.name} using its own uninstaller, then clean-deletes the leftover app-data folders below. Everything Oyster moves goes to the reversible cleanup vault.`
+      : `Clean uninstall — removes ${app.name} and all ${app.leftoverCount || 0} related file(s) it scattered across your system (${app.human} total): caches, preferences, support data, logs. Everything moves to the reversible cleanup vault, so you can restore it.`,
     items });
 }
 
@@ -740,8 +740,8 @@ function renderReviewBody() {
       + (r.win && !(r.items || []).length ? '<div class="empty">No leftover folders found — the uninstaller handles everything.</div>' : '');
     foot.innerHTML = `<span class="rv-foot-msg">${r.win
       ? 'Runs the program’s own uninstaller; any selected app-data folders move to the reversible cleanup vault.'
-      : 'Everything moves to the reversible cleanup vault in ~/.oyster/cleanup — restore it if you change your mind.'}</span>
-      <button class="btn danger" data-rvaction="uninstall">${ic('trash', 15)} Uninstall ${esc(r.appName)}</button>`;
+      : 'Clean uninstall — the app and every selected related file move to the reversible cleanup vault in ~/.oyster/cleanup. Nothing is hard-deleted; restore it if you change your mind.'}</span>
+      <button class="btn danger" data-rvaction="uninstall">${ic('trash', 15)} Clean-uninstall ${esc(r.appName)}</button>`;
   } else if (r.kind === 'important') {
     tools.innerHTML = `<button class="btn ghost rv-mini" data-rvall="1">All</button><button class="btn ghost rv-mini" data-rvall="0">None</button><span class="rv-count" id="rv-n"></span>`;
     list.innerHTML = (r.items || []).map((i) => fileRow(i)).join('');
@@ -885,6 +885,8 @@ async function onContentClick(e) {
   if (a === 'quar-open') return quarantineOpen();
   if (a === 'quar-empty') return quarantineEmpty();
   if (a === 'quar-restore') return quarantineRestore(t.dataset.qid);
+  if (a === 'allow-remove') return allowlistRemove(t.dataset.key);
+  if (a === 'allow-clear') return allowlistClear();
   if (a === 'second-opinion') return secondOpinion();
   if (a === 'reveal') return api.reveal(t.dataset.path);
   if (a === 'close-port') return closePort();
@@ -1110,6 +1112,7 @@ async function runScan(method, params) {
     S.report = r; S.data.Files = r.findings; S.sel.Files = null; S.checked.Files.clear(); S.scanned = true;
     setStatus((r.canceled ? 'Stopped' : 'Done')
       + ` · ${r.filesSeen.toLocaleString()} files in ${r.secs}s · ${r.findings.length} finding(s)`
+      + (r.allowlisted ? ` · ${r.allowlisted} marked-safe hidden` : '')
       + (r.filesUnreadable ? ` · ${r.filesUnreadable.toLocaleString()} unreadable` : '') + ' · offline.');
   } catch (e) { setStatus('Scan stopped: ' + e.message); }
   endScanUI(); S.busy = false; if (S.page === 'Files') renderScan();
@@ -1185,7 +1188,7 @@ async function updateDefs() {
 }
 async function audit() {
   if (S.busy) return; S.busy = true; startScanUI('Auditing software & OS…');
-  try { const r = await api.rpc('audit_vulns'); S.data.Vulnerabilities = r.vulns; S.sel.Vulnerabilities = null; S.checked.Vulnerabilities.clear(); S.scanned = true; setStatus(`${r.vulns.length} vulnerability finding(s).`); }
+  try { const r = await api.rpc('audit_vulns'); S.data.Vulnerabilities = r.vulns; S.sel.Vulnerabilities = null; S.checked.Vulnerabilities.clear(); S.scanned = true; setStatus(`${r.vulns.length} vulnerability finding(s)${r.allowlisted ? ` · ${r.allowlisted} hidden by your allowlist` : ''}.`); }
   catch (e) { setStatus('Audit failed: ' + e.message); }
   endScanUI(); S.busy = false; if (S.page === 'Vulnerabilities') renderScan(); updateNav();
 }
@@ -1202,16 +1205,22 @@ async function quarantine() {
 }
 async function markSafe() {
   const f = S.sel.Files; if (!f) return;
-  await api.rpc('mark_safe', { target: f.target });
+  await api.rpc('mark_safe', allowPayload(f, 'safe'));
   f.resolved = 'safe'; renderRows(); renderInspector();
-  setStatus(`${f.name} marked safe.`);
+  setStatus(`${f.name} marked safe — it won’t be flagged again.`);
 }
 async function vulnIgnore() {
   const f = S.sel.Vulnerabilities; if (!f) return;
-  try { await api.rpc('mark_safe', { target: f.target }); } catch (_e) { /* best-effort log */ }
+  try { await api.rpc('mark_safe', allowPayload(f, 'ignored')); } catch (_e) { /* best-effort */ }
   f.resolved = 'ignored';
   renderRows(); renderInspector(); updateNav();
-  setStatus(`Ignored: ${vulnTitle(f)}. Re-audit to bring it back.`);
+  setStatus(`Ignored: ${vulnTitle(f)}. Won’t show on future audits (undo in Quarantine).`);
+}
+// The finding identity the engine needs to remember a Mark-safe / Ignore so it
+// persists across scans (it computes the stable key from these fields).
+function allowPayload(f, mode) {
+  return { mode, finding: { kind: f.kind, target: f.target, name: f.name,
+    rule: f.rule, evidence: f.evidence || {} } };
 }
 
 // ---------- quarantine vault ----------
@@ -1224,35 +1233,88 @@ function qHuman(b) {
 }
 async function renderQuarantine() {
   content.innerHTML = `<div class="summary-page"><div class="inner">
-    <div class="prose panel" id="quar-body" style="color:var(--muted)">Loading quarantine vault…</div>
+    <div class="quar-card panel" id="quar-body"><div class="quar-empty">Loading quarantine vault…</div></div>
+    <div class="section" style="margin:22px 4px 10px">TRUSTED &amp; IGNORED</div>
+    <div class="quar-card panel" id="allow-body"><div class="quar-empty">Loading…</div></div>
   </div></div>`;
-  await refreshQuarantine();
+  await Promise.all([refreshQuarantine(), refreshAllowlist()]);
+}
+// Manage the persisted Mark-safe / Ignore decisions — the undo for "this keeps
+// coming back". Removing one lets that finding surface again on the next scan.
+async function refreshAllowlist() {
+  const body = $('allow-body'); if (!body) return;
+  let r;
+  try { r = await api.rpc('allowlist_info'); }
+  catch (e) { body.innerHTML = `<div class="quar-empty">Couldn’t load: ${esc(e.message)}</div>`; return; }
+  const items = r.items || [];
+  if (!items.length) {
+    body.innerHTML = `<div class="quar-empty">Nothing trusted yet. Files you Mark safe and findings you Ignore are remembered here, so they stay hidden on future scans.</div>`;
+    return;
+  }
+  const head = `
+    <div class="quar-top">
+      <div class="quar-meta">
+        <div class="quar-count">${items.length} trusted item${items.length === 1 ? '' : 's'}</div>
+        <div class="quar-path" style="color:var(--muted2)">Hidden from future scans until you remove them.</div>
+      </div>
+      <div class="quar-acts"><button class="btn ghost" data-action="allow-clear">Clear all</button></div>
+    </div>`;
+  const modeTag = (m) => `<span class="amode ${m === 'safe' ? 'safe' : 'ign'}">${m === 'safe' ? 'SAFE' : 'IGNORED'}</span>`;
+  const rows = items.map((it) => `
+    <div class="quar-row">
+      <div class="quar-row-x">
+        <div class="quar-row-name">${modeTag(it.mode)}${esc(it.label || it.key)}</div>
+        <div class="quar-row-sub mono">${esc(it.key)}</div>
+      </div>
+      <button class="btn ghost sm" data-action="allow-remove" data-key="${esc(it.key)}">Stop ignoring</button>
+    </div>`).join('');
+  body.innerHTML = head + `<div class="quar-list">${rows}</div>`;
+}
+async function allowlistRemove(key) {
+  try { await api.rpc('allowlist_remove', { key }); setStatus('Removed — it can surface again on the next scan.'); }
+  catch (e) { setStatus('Could not remove: ' + e.message); }
+  await refreshAllowlist();
+}
+async function allowlistClear() {
+  const c = await api.confirm({ message: 'Clear all trusted items?',
+    detail: 'Everything you’ve marked safe or ignored will be able to show up again on the next scan.',
+    buttons: ['Cancel', 'Clear all'] });
+  if (c !== 1) return;
+  try { const x = await api.rpc('allowlist_clear'); setStatus(`Cleared ${x.removed} trusted item(s).`); }
+  catch (e) { setStatus('Could not clear: ' + e.message); }
+  await refreshAllowlist();
 }
 async function refreshQuarantine() {
   let r;
   try { r = await api.rpc('quarantine_info'); }
-  catch (e) { const b = $('quar-body'); if (b) b.textContent = 'Could not read the vault: ' + e.message; return; }
+  catch (e) { const b = $('quar-body'); if (b) b.innerHTML = `<div class="quar-empty">Could not read the vault: ${esc(e.message)}</div>`; return; }
   S.quar = r;
   const body = $('quar-body'); if (!body) return;
-  const head = `<div class="rec-head">${r.count} item(s) · ${qHuman(r.bytes)} in
-    <span class="mono" style="color:var(--accent)">${esc(r.dir)}</span></div>
-    <div class="ins-actions" style="margin:12px 0">
-      <button class="btn" data-action="quar-open">${ic('folder', 14)} Open folder</button>
-      <button class="btn danger" data-action="quar-empty" ${r.count ? '' : 'disabled'}>${ic('trash', 14)} Empty vault</button>
+  const head = `
+    <div class="quar-top">
+      <div class="quar-meta">
+        <div class="quar-count">${r.count} item${r.count === 1 ? '' : 's'} · ${qHuman(r.bytes)}</div>
+        <div class="quar-path mono">${esc(r.dir)}</div>
+      </div>
+      <div class="quar-acts">
+        <button class="btn ghost" data-action="quar-open">${ic('folder', 14)} Open folder</button>
+        <button class="btn danger" data-action="quar-empty" ${r.count ? '' : 'disabled'}>${ic('trash', 14)} Empty vault</button>
+      </div>
     </div>
-    <div class="note-sm">Quarantined files are moved here (defanged so they can’t run), never deleted — restore one anytime. <b>Empty vault</b> erases them for good.</div>`;
+    <div class="quar-note">Quarantined files are moved here (defanged so they can’t run), never deleted — restore one anytime. <b>Empty vault</b> erases them for good.</div>`;
   if (!r.count) {
-    body.innerHTML = head + `<div class="sub3" style="margin-top:14px">The vault is empty — nothing has been quarantined.</div>`;
+    body.innerHTML = head + `<div class="quar-empty">The vault is empty — nothing has been quarantined.</div>`;
     return;
   }
-  const rows = r.items.map((it) => `<div class="q-row" style="display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line)">
-      <div style="flex:1;min-width:0">
-        <div class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.name)}</div>
-        <div class="note-sm" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.original)} · ${qHuman(it.size)}${it.reason ? ' · ' + esc(it.reason) : ''}</div>
+  const rows = r.items.map((it) => `
+    <div class="quar-row">
+      <div class="quar-row-x">
+        <div class="quar-row-name mono">${esc(it.name)}</div>
+        <div class="quar-row-sub">${esc(it.original)} · ${qHuman(it.size)}${it.reason ? ' · ' + esc(it.reason) : ''}</div>
       </div>
-      <button class="btn" data-action="quar-restore" data-qid="${esc(it.qid)}">Restore</button>
+      <button class="btn ghost sm" data-action="quar-restore" data-qid="${esc(it.qid)}">Restore</button>
     </div>`).join('');
-  body.innerHTML = head + `<div style="margin-top:8px">${rows}</div>`;
+  body.innerHTML = head + `<div class="quar-list">${rows}</div>`;
 }
 async function quarantineOpen() {
   if (S.quar && S.quar.dir) await api.openPath(S.quar.dir);
@@ -1327,23 +1389,23 @@ async function bulkMarkSafe() {
   const items = checkedList().filter((f) => !f.resolved);
   if (!items.length) { setStatus('Nothing to mark safe in the selection.'); return; }
   for (const f of items) {
-    try { await api.rpc('mark_safe', { target: f.target }); } catch (_e) { /* best-effort */ }
+    try { await api.rpc('mark_safe', allowPayload(f, 'safe')); } catch (_e) { /* best-effort */ }
     f.resolved = 'safe';
   }
   S.checked[S.page].clear();
   renderRows(); renderInspector(); updateNav();
-  setStatus(`Marked ${items.length} file(s) safe.`);
+  setStatus(`Marked ${items.length} file(s) safe — they won’t be flagged again.`);
 }
 async function bulkIgnore() {
   const items = checkedList().filter((f) => !f.resolved);
   if (!items.length) { setStatus('Nothing to ignore in the selection.'); return; }
   for (const f of items) {
-    try { await api.rpc('mark_safe', { target: f.target }); } catch (_e) { /* best-effort */ }
+    try { await api.rpc('mark_safe', allowPayload(f, 'ignored')); } catch (_e) { /* best-effort */ }
     f.resolved = 'ignored';
   }
   S.checked[S.page].clear();
   renderRows(); renderInspector(); updateNav();
-  setStatus(`Ignored ${items.length} finding(s). Re-audit to bring them back.`);
+  setStatus(`Ignored ${items.length} finding(s). Won’t show on future audits (undo in Quarantine).`);
 }
 async function bulkProc(kind) {
   const all = checkedList();

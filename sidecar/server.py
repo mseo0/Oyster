@@ -157,6 +157,38 @@ def _file_facts(f: dict) -> str:
     )
 
 
+def _allow_key(d: dict) -> str:
+    """A stable identity for a finding so a Mark-safe/Ignore decision can hide it
+    on FUTURE scans. Files key on content hash (survives rename/move); open ports
+    key on the program + port (a new program on that port still shows); other
+    vulns key on their target (CVE id / posture check)."""
+    ev = d.get("evidence") or {}
+    rule = d.get("rule") or ""
+    if d.get("kind") in ("file_malware", "file_suspicious") or _is_file_kind(d):
+        sha = ev.get("sha256") or ""
+        return f"file:sha256:{sha}" if sha else f"file:path:{d.get('target', '')}"
+    if rule.startswith("open-port") or ev.get("port"):
+        exe = ev.get("exe") or ev.get("process") or ""
+        port = ev.get("port") or ""
+        return f"vuln:port:{exe}|{port}" if exe else f"vuln:openport:{port}"
+    return f"vuln:target:{d.get('target', '')}"
+
+
+def _is_file_kind(d: dict) -> bool:
+    return str(d.get("kind", "")).startswith("file")
+
+
+def _allow_label(d: dict) -> str:
+    """Short human description shown in the manage-allowlist view."""
+    ev = d.get("evidence") or {}
+    if _is_file_kind(d):
+        return d.get("name") or d.get("target") or "file"
+    if (d.get("rule") or "").startswith("open-port") or ev.get("port"):
+        who = ev.get("process") or ev.get("exe") or "program"
+        return f"Port {ev.get('port', '?')} · {who}"
+    return d.get("rule") or d.get("target") or "finding"
+
+
 def _proc_dict(t) -> dict:
     ai, action = (("This program is behaving like software that tries to hide "
                    "what it really is. You can pause it to stop it safely without "
@@ -269,12 +301,17 @@ class Engine:
         report = scanner.scan(
             progress=lambda s: _emit("progress", s),
             cancel=self._cancel.is_set, vuln=False)
+        allowed = self.store.allowed_keys()
         findings = []
+        suppressed = 0
         for f in report.findings:
             if f.kind not in FILE_KINDS:
                 continue
             d = _finding_dict(f)
             if downloaded_only and d["source"] == "user-created":
+                continue
+            if _allow_key(d) in allowed:   # user marked this content safe before
+                suppressed += 1
                 continue
             findings.append(d)
         findings.sort(key=lambda d: _sev_rank(d["severity"]))
@@ -284,6 +321,7 @@ class Engine:
                 "filesScanned": report.files_scanned,
                 "filesCached": report.files_cached,
                 "risksSuppressed": report.risks_suppressed,
+                "allowlisted": suppressed,
                 "secs": round(time.time() - t0, 1),
                 "canceled": report.canceled}
 
@@ -295,7 +333,15 @@ class Engine:
         return {"processes": out, "total": total}
 
     def audit_vulns(self, _):
-        findings = [_finding_dict(f) for f in vulnaudit.audit(self.cfg.osv_db_path)]
+        allowed = self.store.allowed_keys()
+        findings = []
+        suppressed = 0
+        for f in vulnaudit.audit(self.cfg.osv_db_path):
+            d = _finding_dict(f)
+            if _allow_key(d) in allowed:   # user ignored this finding before
+                suppressed += 1
+                continue
+            findings.append(d)
         # surface passing OS posture checks too, so the tab is informative
         for chk in posture.audit():
             if chk.ok:
@@ -308,7 +354,7 @@ class Engine:
                     "action": "OK"})
         findings.sort(key=lambda d: _sev_rank(d["severity"]))
         self.scanned_once = True
-        return {"vulns": findings}
+        return {"vulns": findings, "allowlisted": suppressed}
 
     # --- actions ------------------------------------------------------
     def quarantine(self, params):
@@ -350,9 +396,27 @@ class Engine:
         return {"ok": True, "original": str(original)}
 
     def mark_safe(self, params):
-        self.store.log_action("mark_safe", params["target"], True,
-                              reversible=False)
+        # Persist the decision so this exact file/finding stays hidden on future
+        # scans (keyed on a stable identity, not the row). mode is just a label:
+        # "safe" for files, "ignored" for vulnerabilities.
+        d = params.get("finding") or params
+        mode = params.get("mode") or "safe"
+        key = _allow_key(d)
+        self.store.allow(key, str(d.get("kind", "")), _allow_label(d), mode)
+        self.store.log_action("mark_safe", d.get("target", ""), True,
+                              detail=f"key={key}", reversible=True)
+        return {"ok": True, "key": key}
+
+    def allowlist_info(self, _):
+        return {"items": self.store.list_allowed()}
+
+    def allowlist_remove(self, params):
+        """Un-ignore: the finding can surface again on the next scan."""
+        self.store.unallow(params["key"])
         return {"ok": True}
+
+    def allowlist_clear(self, _):
+        return {"removed": self.store.clear_allowed()}
 
     def suspend(self, params):
         processes.suspend(int(params["pid"]))

@@ -73,6 +73,14 @@ class Store:
                 ts REAL, action TEXT, target TEXT,
                 approved INTEGER, detail TEXT, reversible INTEGER
             );
+            -- User's "I trust this" decisions (Mark safe / Ignore). Keyed on a
+            -- stable identity (a file's content hash, a port's program, a CVE's
+            -- target) so the same finding stays hidden on FUTURE scans until the
+            -- user removes it here. Survives restarts; this is the only thing
+            -- that suppresses a finding across runs.
+            CREATE TABLE IF NOT EXISTS allowlist (
+                key TEXT PRIMARY KEY, kind TEXT, label TEXT, mode TEXT, ts REAL
+            );
             """
         )
         self.db.commit()
@@ -85,6 +93,34 @@ class Store:
         )
         self.db.commit()
         return cur.lastrowid
+
+    # --- allowlist (persisted "trust this" decisions) ---------------------
+    def allow(self, key: str, kind: str, label: str, mode: str) -> None:
+        """Remember a Mark-safe / Ignore decision so the finding stays hidden on
+        later scans. INSERT OR REPLACE keeps one row per identity."""
+        self.db.execute(
+            "INSERT OR REPLACE INTO allowlist (key,kind,label,mode,ts)"
+            " VALUES (?,?,?,?,?)", (key, kind, label, mode, time.time()))
+        self.db.commit()
+
+    def allowed_keys(self) -> set[str]:
+        return {r[0] for r in self.db.execute("SELECT key FROM allowlist")}
+
+    def list_allowed(self) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            "SELECT key,kind,label,mode,ts FROM allowlist ORDER BY ts DESC")
+        return [{"key": k, "kind": kd, "label": lb, "mode": m, "ts": ts}
+                for (k, kd, lb, m, ts) in rows]
+
+    def unallow(self, key: str) -> None:
+        self.db.execute("DELETE FROM allowlist WHERE key=?", (key,))
+        self.db.commit()
+
+    def clear_allowed(self) -> int:
+        n = self.db.execute("SELECT COUNT(*) FROM allowlist").fetchone()[0]
+        self.db.execute("DELETE FROM allowlist")
+        self.db.commit()
+        return n
 
     def log_action(self, action: str, target: str, approved: bool,
                    detail: str = "", reversible: bool = True) -> None:

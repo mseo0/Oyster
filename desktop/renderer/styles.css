@@ -225,6 +225,31 @@ button:disabled:hover, .btn:disabled:hover { filter: none; }
 .hero .big { font-size: 19px; font-weight: 700; letter-spacing: -.3px; }
 .hero .sub3 { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
 .prose { font-size: 14.5px; line-height: 1.7; white-space: pre-wrap; padding: 20px 22px; border-radius: 16px; margin-bottom: 16px; }
+/* Quarantine vault */
+.quar-card { padding: 0; overflow: hidden; }
+.quar-top { display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; padding: 20px 22px 16px; }
+.quar-meta { min-width: 0; }
+.quar-count { font: 700 15px 'Hanken Grotesk'; color: var(--text); }
+.quar-path { font-size: 12px; color: var(--accent); margin-top: 5px; word-break: break-all; }
+.quar-acts { display: flex; gap: 9px; flex: 0 0 auto; }
+.quar-acts .btn { height: 38px; }
+.quar-note { font-size: 12px; line-height: 1.55; color: var(--muted2);
+  padding: 0 22px 18px; border-bottom: 1px solid var(--border-soft); }
+.quar-empty { text-align: center; color: var(--muted); padding: 34px 22px; font-size: 13px; }
+.quar-list { padding: 6px 14px 10px; }
+.quar-row { display: flex; align-items: center; gap: 12px; padding: 12px 8px;
+  border-bottom: 1px solid var(--border-soft); }
+.quar-row:last-child { border-bottom: none; }
+.quar-row-x { flex: 1; min-width: 0; }
+.quar-row-name { font-size: 13px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quar-row-sub { font-size: 11px; color: var(--muted2); margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.amode { font: 700 9px 'JetBrains Mono'; letter-spacing: .4px; padding: 2px 6px;
+  border-radius: 5px; margin-right: 8px; vertical-align: 1px; }
+.amode.safe { color: #17A98C; background: rgba(23,169,140,.15); }
+.amode.ign { color: var(--muted2); background: var(--accent-soft); }
 .note { display: flex; gap: 11px; align-items: flex-start; padding: 16px 18px; border-radius: 14px;
   background: var(--accent-soft); border: 1px solid var(--border-soft); }
 .note .h { font-size: 13.5px; font-weight: 700; color: var(--accent); margin-bottom: 3px; }

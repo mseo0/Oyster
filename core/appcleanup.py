@@ -32,13 +32,17 @@ _LIBRARY = {
     "Application Support": "support files",
     "Caches": "cache",
     "Preferences": "preferences",
+    "Preferences/ByHost": "per-host preferences",
     "Logs": "logs",
     "Containers": "sandbox container",
     "Group Containers": "group container",
+    "Application Scripts": "sandbox scripts",
     "Saved Application State": "saved state",
     "HTTPStorages": "web storage",
     "WebKit": "web data",
+    "Cookies": "cookies",
     "LaunchAgents": "launch agent",
+    "Crash Reports": "crash reports",
 }
 _CAP = 300   # max leftover entries returned per app
 

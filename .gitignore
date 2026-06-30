@@ -57,3 +57,7 @@ Desktop.ini
 # Bundled ClamAV is assembled in CI (binaries + DB), not committed
 desktop/resources/clamav/*
 !desktop/resources/clamav/.gitkeep
+
+# Demo harness, recordings, and the GIF — local only, not committed
+demo/
+.playwright-mcp/
